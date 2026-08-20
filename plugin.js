@@ -1,1078 +1,1494 @@
-(function () {
+/* =========================================================
+   《心动现场》 · 恋综模拟器
+   v1.0.0 · UI First
+   作者：linyin8945
+
+   第一版重点：
+   - 完整四底栏
+   - 顶栏 + 返回 Roche
+   - 低饱和高级粉色视觉
+   - 节目 / 嘉宾 / 关系 / 档案页面
+   - 从 Roche 读取当前 USER / CHAR
+   - 使用 roche.storage 保存插件自己的档案
+   - 暂不接入 AI，先把 UI 做完整、稳定
+   ========================================================= */
+
+(() => {
   "use strict";
 
-  var PLUGIN_ID = "xindong-xianchang";
-  var APP_ID = "xindong-xianchang-home";
-  var RECENT_DAYS = 3;
-  var STAGE_SPAN = 20;
+  const PLUGIN_ID = "xindong-xianchang";
+  const APP_ID = "xindong-xianchang-home";
+  const STYLE_ID = "xindong-xianchang-style";
 
-  // ---------- 工具函数 ----------
+  const state = {
+    roche: null,
+    container: null,
+    activeTab: "show",
+    user: null,
+    characters: [],
+    archives: [],
+    currentArchive: null,
+    listeners: [],
+  };
 
-  function uid() {
-    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
-    return "id-" + Date.now() + "-" + Math.random().toString(16).slice(2);
-  }
-
-  function escapeHtml(str) {
-    if (str === null || str === undefined) return "";
-    return String(str)
+  const escapeHTML = (value) => {
+    return String(value ?? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
+      .replace(/'/g, "&#039;");
+  };
 
-  var DANMU_NAMES = [
-    "路过的吃瓜观众", "嗑到了", "本季颜值天花板", "剪辑鬼才",
-    "已经在磕了", "弃剧警告", "冲了冲了", "理性观众",
-    "护妻狂魔", "阴谋论选手", "求快进到下集", "已经代入编剧",
-    "职业哈人", "深夜蹲直播", "客观分析师", "纯路人",
-    "已经组CP", "退钱可还行", "节目组懂的", "弹幕护体",
-    "刚追上", "二倍速追剧", "求个后续", "看戏不嫌事大",
-    "已经磕上头", "编剧到底想干嘛", "本轮最佳", "求个官配",
-    "催更选手", "吃瓜第一线"
-  ];
+  const uid = () =>
+    (globalThis.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `archive-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  function pickDanmuName() {
-    return DANMU_NAMES[Math.floor(Math.random() * DANMU_NAMES.length)];
-  }
+  const displayName = (item, fallback = "未命名") =>
+    item?.handle || item?.name || fallback;
 
-  function parseModelJson(text) {
+  const realName = (item, fallback = "未命名") =>
+    item?.name || item?.handle || fallback;
+
+  const avatar = (item) => item?.avatar || "";
+
+  async function safeGet(key, fallback) {
     try {
-      return JSON.parse(text);
-    } catch (e) {
-      var match = text && text.match(/\{[\s\S]*\}/);
-      if (match) {
-        try { return JSON.parse(match[0]); } catch (e2) {}
-      }
-      throw new Error("AI 返回内容无法解析为有效 JSON");
+      const value = await state.roche.storage.get(key);
+      return value ?? fallback;
+    } catch {
+      return fallback;
     }
   }
 
-  // ---------- 存储 ----------
-
-  async function getArchiveIndex(roche) {
-    var index = await roche.storage.get("archiveIndex");
-    return index || [];
-  }
-
-  async function loadArchive(roche, archiveId) {
-    return await roche.storage.get("archive:" + archiveId);
-  }
-
-  async function saveArchive(archive, roche) {
-    archive.lastSavedAt = Date.now();
-    await roche.storage.set("archive:" + archive.archiveId, archive);
-
-    var index = await getArchiveIndex(roche);
-    var entry = null;
-    for (var i = 0; i < index.length; i++) {
-      if (index[i].archiveId === archive.archiveId) { entry = index[i]; break; }
-    }
-    var lastDay = archive.timeline[archive.timeline.length - 1];
-    var lastSummaryText = "";
-    if (lastDay) {
-      lastSummaryText = lastDay.summary || (lastDay.fullNarrative ? lastDay.fullNarrative.slice(0, 40) : "");
-    }
-    var summaryEntry = {
-      archiveId: archive.archiveId,
-      title: archive.title,
-      currentDay: archive.currentDay,
-      characterNames: archive.characters.map(function (c) { return c.name; }),
-      characterAvatars: archive.characters.map(function (c) { return c.avatar; }),
-      lastSummary: lastSummaryText,
-      lastSavedAt: archive.lastSavedAt
-    };
-    if (entry) {
-      Object.assign(entry, summaryEntry);
-    } else {
-      index.push(summaryEntry);
-    }
-    await roche.storage.set("archiveIndex", index);
-  }
-
-  async function deleteArchiveData(roche, archiveId) {
-    await roche.storage.delete("archive:" + archiveId);
-    var index = await getArchiveIndex(roche);
-    index = index.filter(function (i) { return i.archiveId !== archiveId; });
-    await roche.storage.set("archiveIndex", index);
-  }
-
-  function createNewArchive(opts) {
-    var day1 = { day: 1, summary: "", fullNarrative: "" };
-    return {
-      archiveId: uid(),
-      title: opts.title,
-      createdAt: Date.now(),
-      lastSavedAt: Date.now(),
-      userPersona: opts.userPersona,
-      characters: opts.characters,
-      worldbook: opts.worldbook,
-      seasonConfig: opts.seasonConfig,
-      currentDay: 1,
-      currentTime: "20:00",
-      currentSceneLabel: "心动小屋 · 初次见面",
-      timeline: [day1],
-      stageSummaries: [],
-      relationships: { userToChar: {}, charToChar: {} },
-      privateMessages: {},
-      events: [],
-      pendingRequest: false
-    };
-  }
-
-  // ---------- AI：节目主循环 ----------
-
-  function buildShowContext(archive) {
-    var timeline = archive.timeline;
-    var recentDays = timeline.slice(-RECENT_DAYS);
-    var olderSummaries = timeline.slice(0, -RECENT_DAYS).map(function (t) { return t.summary; }).filter(Boolean);
-    var stageSummaryText = archive.stageSummaries.map(function (s) { return s.summary; }).join("\n");
-
-    var charBlock = archive.characters.map(function (c) {
-      var head = "【" + c.name + (c.handle ? "（" + c.handle + "）" : "") + "】";
-      var body = "人设：" + (c.personaSnapshot || "");
-      var tag = c.isNewGuest ? "（本轮首次登场，无历史记忆）" : "";
-      return head + "\n" + body + "\n" + tag;
-    }).join("\n\n");
-
-    var relationshipBlock = JSON.stringify(archive.relationships);
-    var worldbookBlock = (archive.worldbook && archive.worldbook.snapshotText) || "";
-
-    var recentText = recentDays.map(function (d) {
-      return "DAY" + d.day + ": " + (d.fullNarrative || "（尚未发生）");
-    }).join("\n\n");
-
-    return [
-      "【本季设定】",
-      archive.seasonConfig.description || "（无特别设定）",
-      "氛围：" + (archive.seasonConfig.tone || "自然发展"),
-      "禁止内容：" + (archive.seasonConfig.forbiddenContent || "无"),
-      "",
-      "【世界设定】",
-      worldbookBlock || "（无）",
-      "",
-      "【用户人设】",
-      archive.userPersona.personaSnapshot || "",
-      "",
-      "【嘉宾人设】",
-      charBlock,
-      "",
-      "【阶段回顾】",
-      stageSummaryText || "（暂无）",
-      "",
-      "【近期剧情摘要】",
-      olderSummaries.join("\n") || "（暂无）",
-      "",
-      "【最近剧情原文】",
-      recentText,
-      "",
-      "【当前关系状态】",
-      relationshipBlock,
-      "",
-      "【当前场景】",
-      archive.currentSceneLabel + " · DAY" + archive.currentDay + " · " + archive.currentTime
-    ].join("\n");
-  }
-
-  var SHOW_RULES_PROMPT = [
-    "你是恋综节目的剧情引擎。规则：",
-    "1. 每位嘉宾的行为完全基于其人设，不能被强制安排喜欢/拒绝/嫉妒 USER，一切由人设与当前剧情自然决定。",
-    "2. 三个选项必须体现不同的应对方向（例如：正面回应/转移视线/试探反应），不能是同一动作的力度递进，不能暗示哪个是正确答案。",
-    "3. 弹幕提到嘉宾时必须直接使用其真实姓名或昵称，不能使用泛称。",
-    "4. 只有当剧情时间自然推进到下一天时，才将 dayAdvanced 设为 true，并附带 daySummary（该天的剧情摘要）。",
-    "5. relationshipChanges 里的 pair 字段命名规则：USER 与某嘉宾的关系写成 \"user-嘉宾ID\"；两个嘉宾之间的关系写成 \"较小ID_较大ID\"（按字符串排序）。必须使用真实 characterId，不能编造。",
-    "6. 如果剧情中提到有新嘉宾即将加入，只在 events 里生成一条预告事件，不要在 newGuestIntroduced 里编造角色，newGuestIntroduced 永远返回 null（新嘉宾由玩家在界面里手动从已有角色中选择加入）。",
-    "7. 严格按照下面的 JSON 结构返回，不要输出多余文字，不要用代码块包裹。",
-    "",
-    "返回结构：",
-    "{",
-    "  \"narrative\": \"\",",
-    "  \"sceneLabel\": \"\",",
-    "  \"currentTime\": \"\",",
-    "  \"charActions\": [{ \"characterId\": \"\", \"displayName\": \"\", \"action\": \"\" }],",
-    "  \"choices\": [{ \"id\": \"1\", \"text\": \"\" }, { \"id\": \"2\", \"text\": \"\" }, { \"id\": \"3\", \"text\": \"\" }],",
-    "  \"danmu\": [\"\", \"\"],",
-    "  \"events\": [{ \"type\": \"\", \"title\": \"\", \"detail\": \"\" }],",
-    "  \"relationshipChanges\": [{ \"pair\": \"\", \"tagsAdded\": [], \"tagsRemoved\": [], \"milestone\": \"\", \"statusLine\": \"\" }],",
-    "  \"dayAdvanced\": false,",
-    "  \"daySummary\": null,",
-    "  \"stageSummary\": null,",
-    "  \"newGuestIntroduced\": null",
-    "}"
-  ].join("\n");
-
-  function computeStageRange(archive) {
-    var doneDays = archive.stageSummaries.length * STAGE_SPAN;
-    var pad = function (n) { return String(n).padStart(2, "0"); };
-    return "DAY" + pad(doneDays + 1) + "-DAY" + pad(doneDays + STAGE_SPAN);
-  }
-
-  function applyRelationshipChange(archive, change) {
-    if (!change || !change.pair) return;
-    var isUserPair = change.pair.indexOf("user-") === 0;
-    var bucket = isUserPair ? archive.relationships.userToChar : archive.relationships.charToChar;
-    var key = isUserPair ? change.pair.replace("user-", "") : change.pair;
-
-    if (!bucket[key]) bucket[key] = { tags: [], milestones: [] };
-    var record = bucket[key];
-
-    (change.tagsAdded || []).forEach(function (t) {
-      if (record.tags.indexOf(t) === -1) record.tags.push(t);
-    });
-    (change.tagsRemoved || []).forEach(function (t) {
-      record.tags = record.tags.filter(function (x) { return x !== t; });
-    });
-    if (change.milestone) {
-      record.milestones.push({ day: archive.currentDay, event: change.milestone });
-    }
-    if (change.statusLine) record.statusLine = change.statusLine;
-  }
-
-  function applyStoryResult(archive, data) {
-    archive.currentSceneLabel = data.sceneLabel || archive.currentSceneLabel;
-    archive.currentTime = data.currentTime || archive.currentTime;
-
-    var dayForThisNarrative = archive.currentDay;
-    var dayEntry = null;
-    for (var i = 0; i < archive.timeline.length; i++) {
-      if (archive.timeline[i].day === dayForThisNarrative) { dayEntry = archive.timeline[i]; break; }
-    }
-    if (dayEntry) {
-      dayEntry.fullNarrative = (dayEntry.fullNarrative ? dayEntry.fullNarrative + "\n" : "") + (data.narrative || "");
-    } else {
-      archive.timeline.push({ day: dayForThisNarrative, summary: "", fullNarrative: data.narrative || "" });
-    }
-
-    (data.relationshipChanges || []).forEach(function (change) {
-      applyRelationshipChange(archive, change);
-    });
-
-    if (data.events && data.events.length) {
-      data.events.forEach(function (e) {
-        archive.events.push(Object.assign({}, e, { day: dayForThisNarrative }));
-      });
-    }
-
-    if (data.dayAdvanced) {
-      var finishedDay = null;
-      for (var j = 0; j < archive.timeline.length; j++) {
-        if (archive.timeline[j].day === dayForThisNarrative) { finishedDay = archive.timeline[j]; break; }
-      }
-      if (finishedDay) finishedDay.summary = data.daySummary || "";
-      archive.currentDay += 1;
-      archive.timeline.push({ day: archive.currentDay, summary: "", fullNarrative: "" });
-
-      if (data.stageSummary) {
-        archive.stageSummaries.push({
-          range: computeStageRange(archive),
-          summary: data.stageSummary
-        });
-      }
-    }
-  }
-
-  async function advanceStory(archive, roche, userAction) {
-    if (archive.pendingRequest) {
-      roche.ui.toast("剧情正在生成，请稍候");
-      return null;
-    }
-    archive.pendingRequest = true;
-    await saveArchive(archive, roche);
-
+  async function safeSet(key, value) {
     try {
-      var systemPrompt = buildShowContext(archive) + "\n\n" + SHOW_RULES_PROMPT;
-      var result = await roche.ai.chat({
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userAction }
-        ],
-        temperature: 0.9
-      });
-
-      var data = parseModelJson(result.text);
-      applyStoryResult(archive, data);
-      archive.pendingRequest = false;
-      await saveArchive(archive, roche);
-      return data;
-    } catch (err) {
-      archive.pendingRequest = false;
-      await saveArchive(archive, roche);
-      roche.ui.toast("剧情生成失败，请重试");
-      throw err;
+      await state.roche.storage.set(key, value);
+    } catch (error) {
+      console.error("[心动现场] storage.set failed", error);
     }
   }
 
-  async function addNewGuestToArchive(archive, roche, characterId) {
-    var rocheChar = await roche.character.get(characterId);
-    archive.characters.push({
-      characterId: rocheChar.id,
-      name: rocheChar.name,
-      handle: rocheChar.handle,
-      avatar: rocheChar.avatar,
-      bio: rocheChar.bio,
-      personaSnapshot: rocheChar.persona || rocheChar.bio || "",
-      joinedDay: archive.currentDay,
-      isNewGuest: true
-    });
-    await saveArchive(archive, roche);
-  }
-
-  // ---------- AI：私信 ----------
-
-  function buildPrivateMessageContext(archive, characterId) {
-    var character = null;
-    for (var i = 0; i < archive.characters.length; i++) {
-      if (archive.characters[i].characterId === characterId) { character = archive.characters[i]; break; }
+  function toast(message) {
+    try {
+      state.roche.ui.toast(message);
+    } catch {
+      console.log(message);
     }
-    if (!character) return "";
-
-    var relation = archive.relationships.userToChar[characterId] || { tags: [], statusLine: "" };
-    var thread = archive.privateMessages[characterId] || { messages: [], summary: "" };
-    var recentSummary = archive.timeline.slice(-2).map(function (t) { return t.summary; }).filter(Boolean).join("\n");
-
-    return [
-      "你正在扮演 " + character.name + "，通过私信和 USER 一对一聊天。",
-      "人设：" + (character.personaSnapshot || ""),
-      "当前关系标签：" + (relation.tags.join("、") || "无"),
-      "关系状态：" + (relation.statusLine || "无"),
-      "节目最近发生：" + (recentSummary || "无"),
-      "早期私信摘要：" + (thread.summary || "无"),
-      "",
-      "请严格按以下 JSON 返回，不要输出多余文字，不要用代码块包裹：",
-      "{ \"reply\": \"角色的回复文本\", \"relationshipChanges\": [{ \"pair\": \"user-" + characterId + "\", \"tagsAdded\": [], \"tagsRemoved\": [], \"milestone\": \"\", \"statusLine\": \"\" }] }",
-      "如果这轮没有关系变化，relationshipChanges 返回空数组。"
-    ].join("\n");
   }
-
-  async function sendPrivateMessage(archive, roche, characterId, userText) {
-    if (!archive.privateMessages[characterId]) {
-      archive.privateMessages[characterId] = { messages: [], summary: "" };
-    }
-    var thread = archive.privateMessages[characterId];
-    var systemPrompt = buildPrivateMessageContext(archive, characterId);
-
-    var history = thread.messages.slice(-20).map(function (m) {
-      return { role: m.role === "user" ? "user" : "assistant", content: m.text };
-    });
-
-    var result = await roche.ai.chat({
-      messages: [{ role: "system", content: systemPrompt }].concat(history, [{ role: "user", content: userText }])
-    });
-
-    var data = parseModelJson(result.text);
-
-    thread.messages.push({ role: "user", text: userText, timestamp: Date.now() });
-    thread.messages.push({ role: "char", text: data.reply, timestamp: Date.now() });
-    (data.relationshipChanges || []).forEach(function (change) {
-      applyRelationshipChange(archive, change);
-    });
-
-    if (thread.messages.length > 40) {
-      var toCompress = thread.messages.slice(0, 20);
-      thread.summary = (thread.summary ? thread.summary + "\n" : "") +
-        toCompress.map(function (m) { return (m.role === "user" ? "USER：" : "角色："); } ).join(" ");
-      thread.messages = thread.messages.slice(20);
-    }
-
-    await saveArchive(archive, roche);
-    return data.reply;
-  }
-
-  //  // ---------- 样式 ----------
-
-  var STYLE_ID = "xindong-xianchang-style";
-  var STYLE_TEXT = [
-    ".roche-plugin-xindong { position:relative; width:100%; height:100%; display:flex; flex-direction:column; background:#0f0f14; color:#f0f0f5; font-family:-apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif; overflow:hidden; box-sizing:border-box; }",
-    ".roche-plugin-xindong * { box-sizing:border-box; }",
-    ".xdxc-screen { flex:1; overflow-y:auto; padding:12px; padding-bottom:76px; }",
-    ".xdxc-topbar { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#17171f; border-bottom:1px solid #26262f; }",
-    ".xdxc-topbar-left { display:flex; align-items:center; gap:8px; cursor:pointer; color:#c9c9d4; }",
-    ".xdxc-topbar-mid { text-align:center; }",
-    ".xdxc-topbar-mid .xdxc-title { font-size:14px; font-weight:600; }",
-    ".xdxc-topbar-mid .xdxc-sub { font-size:11px; color:#e0668c; margin-top:2px; }",
-    ".xdxc-topbar-right { display:flex; align-items:center; gap:10px; cursor:pointer; }",
-    ".xdxc-tabbar { display:flex; border-top:1px solid #26262f; background:#17171f; position:absolute; left:0; right:0; bottom:0; }",
-    ".xdxc-tab { flex:1; text-align:center; padding:10px 0; font-size:12px; color:#8a8a96; cursor:pointer; }",
-    ".xdxc-tab.active { color:#f0f0f5; font-weight:600; }",
-    ".xdxc-card { background:#1a1a22; border-radius:12px; padding:14px; margin-bottom:12px; }",
-    ".xdxc-card-title { font-size:15px; font-weight:600; margin-bottom:4px; }",
-    ".xdxc-card-sub { font-size:12px; color:#8a8a96; margin-bottom:6px; }",
-    ".xdxc-card-quote { font-size:13px; color:#c9c9d4; }",
-    ".xdxc-btn { display:inline-block; padding:9px 16px; border-radius:20px; background:#e0668c; color:#fff; font-size:13px; text-align:center; cursor:pointer; border:none; }",
-    ".xdxc-btn.secondary { background:#2a2a34; color:#c9c9d4; }",
-    ".xdxc-btn.block { display:block; width:100%; margin-top:10px; }",
-    ".xdxc-btn-row { display:flex; gap:8px; margin-top:8px; }",
-    ".xdxc-empty { text-align:center; color:#66666f; padding:60px 20px; font-size:13px; }",
-    ".xdxc-avatar { width:44px; height:44px; border-radius:50%; object-fit:cover; background:#2a2a34; flex-shrink:0; }",
-    ".xdxc-avatar-row { display:flex; margin-bottom:8px; }",
-    ".xdxc-avatar-row img { margin-left:-10px; border:2px solid #1a1a22; }",
-    ".xdxc-scene-box { background:#1a1a22; border-radius:12px; padding:16px; position:relative; overflow:hidden; min-height:140px; margin-bottom:12px; }",
-    ".xdxc-scene-label { font-size:12px; color:#e0668c; margin-bottom:8px; }",
-    ".xdxc-narrative { font-size:14px; line-height:1.8; white-space:pre-wrap; }",
-    ".xdxc-char-actions { margin-top:10px; }",
-    ".xdxc-char-action { font-size:12px; color:#a8a8b4; margin-top:4px; }",
-    ".xdxc-danmu-layer { position:absolute; top:0; left:0; right:0; height:100%; pointer-events:none; overflow:hidden; }",
-    ".xdxc-danmu-item { position:absolute; white-space:nowrap; font-size:11px; color:#fff; background:rgba(0,0,0,0.35); padding:2px 8px; border-radius:10px; animation:xdxc-danmu-move 7s linear forwards; }",
-    "@keyframes xdxc-danmu-move { from { transform:translateX(100%); } to { transform:translateX(-220%); } }",
-    ".xdxc-events { margin:10px 0; }",
-    ".xdxc-event-card { background:#241a22; border-left:3px solid #e0668c; padding:8px 10px; border-radius:8px; font-size:12px; margin-bottom:6px; }",
-    ".xdxc-event-title { font-weight:600; margin-bottom:2px; }",
-    ".xdxc-choices { margin-top:12px; }",
-    ".xdxc-choice-btn { display:block; width:100%; text-align:left; padding:12px 14px; margin-bottom:8px; border-radius:10px; background:#1a1a22; color:#f0f0f5; font-size:13px; border:1px solid #2a2a34; cursor:pointer; }",
-    ".xdxc-choice-btn:active { background:#242430; }",
-    ".xdxc-custom-box { display:flex; gap:8px; margin-top:6px; }",
-    ".xdxc-custom-box textarea { flex:1; background:#1a1a22; border:1px solid #2a2a34; border-radius:10px; color:#f0f0f5; padding:10px; font-size:13px; resize:none; height:40px; }",
-    ".xdxc-tag { display:inline-block; background:#2a2a34; color:#e0668c; font-size:11px; padding:3px 8px; border-radius:10px; margin-right:6px; margin-bottom:6px; }",
-    ".xdxc-form-group { margin-bottom:16px; }",
-    ".xdxc-form-label { font-size:13px; color:#c9c9d4; margin-bottom:6px; display:block; }",
-    ".xdxc-form-group input[type=text], .xdxc-form-group textarea, .xdxc-form-group select { width:100%; background:#1a1a22; border:1px solid #2a2a34; border-radius:8px; color:#f0f0f5; padding:9px; font-size:13px; }",
-    ".xdxc-form-group textarea { min-height:60px; resize:vertical; }",
-    ".xdxc-checkbox-row { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid #22222c; }",
-    ".xdxc-checkbox-row label { font-size:13px; flex:1; }",
-    ".xdxc-chat-list { display:flex; flex-direction:column; gap:8px; }",
-    ".xdxc-bubble { max-width:78%; padding:9px 12px; border-radius:14px; font-size:13px; line-height:1.5; white-space:pre-wrap; }",
-    ".xdxc-bubble.user { align-self:flex-end; background:#e0668c; color:#fff; }",
-    ".xdxc-bubble.char { align-self:flex-start; background:#1a1a22; color:#f0f0f5; }",
-    ".xdxc-loading { text-align:center; color:#8a8a96; font-size:12px; padding:20px; }"
-  ].join("\n");
 
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
-    var style = document.createElement("style");
+
+    const style = document.createElement("style");
     style.id = STYLE_ID;
-    style.textContent = STYLE_TEXT;
+    style.textContent = `
+      .roche-plugin-xindong-xianchang,
+      .roche-plugin-xindong-xianchang * {
+        box-sizing: border-box;
+      }
+
+      .roche-plugin-xindong-xianchang {
+        --xd-bg: #f6f1f1;
+        --xd-paper: rgba(255,255,255,.82);
+        --xd-paper-strong: #fffafa;
+        --xd-pink: #b88791;
+        --xd-pink-dark: #855d67;
+        --xd-pink-soft: #ead9dc;
+        --xd-pink-faint: #f1e5e6;
+        --xd-text: #41383a;
+        --xd-muted: #8e8183;
+        --xd-line: rgba(117,91,97,.13);
+        --xd-shadow: 0 14px 40px rgba(102,73,80,.08);
+
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 100%;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 92% 7%, rgba(210,169,176,.18), transparent 30%),
+          radial-gradient(circle at 7% 75%, rgba(222,191,196,.18), transparent 28%),
+          linear-gradient(145deg, #f8f4f3 0%, #f3eded 48%, #f7f1f1 100%);
+        color: var(--xd-text);
+        font-family:
+          -apple-system, BlinkMacSystemFont, "SF Pro Display",
+          "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .roche-plugin-xindong-xianchang button,
+      .roche-plugin-xindong-xianchang input,
+      .roche-plugin-xindong-xianchang textarea {
+        font: inherit;
+      }
+
+      .xd-topbar {
+        flex: 0 0 auto;
+        height: 72px;
+        padding: 12px 14px 8px;
+        display: flex;
+        align-items: flex-end;
+        gap: 10px;
+        background: rgba(249,246,245,.78);
+        border-bottom: 1px solid var(--xd-line);
+        backdrop-filter: blur(22px) saturate(125%);
+        -webkit-backdrop-filter: blur(22px) saturate(125%);
+        position: relative;
+        z-index: 20;
+      }
+
+      .xd-back {
+        width: 40px;
+        height: 40px;
+        flex: 0 0 40px;
+        border: 0;
+        border-radius: 14px;
+        background: rgba(255,255,255,.64);
+        color: var(--xd-pink-dark);
+        display: grid;
+        place-items: center;
+        font-size: 25px;
+        line-height: 1;
+        cursor: pointer;
+        box-shadow: 0 4px 18px rgba(101,73,80,.06);
+      }
+
+      .xd-back:active { transform: scale(.96); }
+
+      .xd-heading {
+        min-width: 0;
+        flex: 1;
+        padding-bottom: 2px;
+      }
+
+      .xd-eyebrow {
+        font-size: 10px;
+        letter-spacing: .18em;
+        color: var(--xd-pink);
+        font-weight: 700;
+        margin-bottom: 2px;
+      }
+
+      .xd-title {
+        font-size: 21px;
+        line-height: 1.15;
+        letter-spacing: -.03em;
+        font-weight: 760;
+        color: #403638;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .xd-topday {
+        flex: 0 0 auto;
+        padding: 8px 11px;
+        border-radius: 13px;
+        background: rgba(255,255,255,.65);
+        border: 1px solid rgba(145,110,118,.10);
+        text-align: right;
+        margin-bottom: 1px;
+      }
+
+      .xd-topday-main {
+        display: block;
+        font-size: 11px;
+        font-weight: 750;
+        letter-spacing: .08em;
+        color: var(--xd-pink-dark);
+      }
+
+      .xd-topday-sub {
+        display: block;
+        margin-top: 2px;
+        font-size: 9px;
+        color: var(--xd-muted);
+        letter-spacing: .12em;
+      }
+
+      .xd-content {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
+        position: relative;
+      }
+
+      .xd-page {
+        width: 100%;
+        height: 100%;
+        overflow-y: auto;
+        padding: 18px 16px 104px;
+        scrollbar-width: none;
+      }
+
+      .xd-page::-webkit-scrollbar { display: none; }
+
+      .xd-bottom {
+        flex: 0 0 auto;
+        height: 82px;
+        padding: 8px 10px 15px;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 5px;
+        background: rgba(250,247,246,.88);
+        border-top: 1px solid var(--xd-line);
+        backdrop-filter: blur(22px) saturate(125%);
+        -webkit-backdrop-filter: blur(22px) saturate(125%);
+        position: relative;
+        z-index: 20;
+      }
+
+      .xd-tab {
+        border: 0;
+        background: transparent;
+        color: #a09597;
+        border-radius: 16px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        transition: .18s ease;
+      }
+
+      .xd-tab-icon {
+        width: 29px;
+        height: 29px;
+        border-radius: 11px;
+        display: grid;
+        place-items: center;
+        font-size: 16px;
+        transition: .18s ease;
+      }
+
+      .xd-tab-label {
+        font-size: 10px;
+        font-weight: 650;
+        letter-spacing: .03em;
+      }
+
+      .xd-tab.active {
+        color: var(--xd-pink-dark);
+      }
+
+      .xd-tab.active .xd-tab-icon {
+        background: var(--xd-pink-faint);
+        box-shadow: inset 0 0 0 1px rgba(184,135,145,.10);
+        transform: translateY(-1px);
+      }
+
+      .xd-kicker {
+        color: var(--xd-pink);
+        font-size: 10px;
+        letter-spacing: .18em;
+        font-weight: 750;
+        text-transform: uppercase;
+      }
+
+      .xd-hero {
+        margin-top: 7px;
+        padding: 22px 20px 20px;
+        border-radius: 27px;
+        min-height: 230px;
+        position: relative;
+        overflow: hidden;
+        background:
+          linear-gradient(135deg, rgba(255,255,255,.90), rgba(245,229,231,.80));
+        border: 1px solid rgba(157,116,124,.13);
+        box-shadow: var(--xd-shadow);
+      }
+
+      .xd-hero::before {
+        content: "";
+        position: absolute;
+        width: 190px;
+        height: 190px;
+        border-radius: 50%;
+        right: -55px;
+        top: -80px;
+        background: rgba(184,135,145,.16);
+      }
+
+      .xd-hero::after {
+        content: "";
+        position: absolute;
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+        right: 35px;
+        bottom: -75px;
+        border: 1px solid rgba(184,135,145,.20);
+      }
+
+      .xd-hero > * { position: relative; z-index: 1; }
+
+      .xd-hero-title {
+        margin: 8px 0 7px;
+        font-size: 32px;
+        line-height: 1.05;
+        letter-spacing: -.055em;
+        font-weight: 800;
+      }
+
+      .xd-hero-sub {
+        max-width: 300px;
+        color: #75696b;
+        font-size: 13px;
+        line-height: 1.7;
+      }
+
+      .xd-live {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 19px;
+        padding: 7px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,.70);
+        color: var(--xd-pink-dark);
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: .08em;
+      }
+
+      .xd-live-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #b88791;
+        box-shadow: 0 0 0 4px rgba(184,135,145,.12);
+      }
+
+      .xd-section-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 22px 2px 10px;
+      }
+
+      .xd-section-title {
+        font-size: 17px;
+        font-weight: 780;
+        letter-spacing: -.025em;
+      }
+
+      .xd-section-note {
+        font-size: 10px;
+        color: var(--xd-muted);
+      }
+
+      .xd-scene {
+        border-radius: 23px;
+        background: rgba(255,255,255,.72);
+        border: 1px solid var(--xd-line);
+        padding: 17px;
+        box-shadow: 0 8px 25px rgba(96,70,76,.045);
+      }
+
+      .xd-scene-label {
+        font-size: 10px;
+        color: var(--xd-pink);
+        letter-spacing: .12em;
+        font-weight: 750;
+      }
+
+      .xd-narrative {
+        margin-top: 10px;
+        font-size: 14px;
+        line-height: 1.85;
+        color: #4b4143;
+      }
+
+      .xd-quote {
+        margin-top: 13px;
+        padding: 12px 13px;
+        border-left: 2px solid var(--xd-pink);
+        background: rgba(245,231,233,.48);
+        border-radius: 0 13px 13px 0;
+        font-size: 13px;
+        line-height: 1.65;
+        color: #65575a;
+      }
+
+      .xd-choice-grid {
+        display: grid;
+        gap: 9px;
+      }
+
+      .xd-choice {
+        width: 100%;
+        text-align: left;
+        border: 1px solid rgba(143,105,113,.12);
+        background: rgba(255,255,255,.78);
+        color: #514548;
+        border-radius: 17px;
+        padding: 14px 15px;
+        cursor: pointer;
+        box-shadow: 0 5px 16px rgba(100,73,79,.035);
+        transition: .16s ease;
+      }
+
+      .xd-choice:hover {
+        border-color: rgba(184,135,145,.35);
+        background: #fffafa;
+      }
+
+      .xd-choice:active { transform: scale(.985); }
+
+      .xd-choice-no {
+        display: inline-block;
+        width: 23px;
+        color: var(--xd-pink);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .xd-danmu {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+
+      .xd-danmu span {
+        padding: 7px 10px;
+        border-radius: 999px;
+        background: rgba(255,255,255,.66);
+        border: 1px solid rgba(140,104,112,.10);
+        color: #75686b;
+        font-size: 10px;
+      }
+
+      .xd-card-grid {
+        display: grid;
+        gap: 11px;
+      }
+
+      .xd-guest-card {
+        display: flex;
+        align-items: center;
+        gap: 13px;
+        padding: 13px;
+        border-radius: 20px;
+        background: rgba(255,255,255,.76);
+        border: 1px solid var(--xd-line);
+        box-shadow: 0 7px 22px rgba(101,73,80,.045);
+      }
+
+      .xd-avatar {
+        width: 54px;
+        height: 54px;
+        flex: 0 0 54px;
+        border-radius: 17px;
+        overflow: hidden;
+        background: linear-gradient(145deg, #e8d5d8, #f4e8e9);
+        display: grid;
+        place-items: center;
+        color: var(--xd-pink-dark);
+        font-size: 19px;
+        font-weight: 800;
+      }
+
+      .xd-avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .xd-guest-main {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .xd-guest-name {
+        font-size: 15px;
+        font-weight: 780;
+      }
+
+      .xd-guest-handle {
+        margin-top: 3px;
+        font-size: 10px;
+        color: var(--xd-pink);
+      }
+
+      .xd-guest-bio {
+        margin-top: 5px;
+        font-size: 11px;
+        color: var(--xd-muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .xd-arrow {
+        color: #b3a5a8;
+        font-size: 18px;
+      }
+
+      .xd-relation {
+        padding: 17px;
+        border-radius: 22px;
+        background: rgba(255,255,255,.76);
+        border: 1px solid var(--xd-line);
+        box-shadow: 0 7px 22px rgba(101,73,80,.045);
+      }
+
+      .xd-relation-top {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+      }
+
+      .xd-relation-names {
+        flex: 1;
+      }
+
+      .xd-relation-name {
+        font-size: 14px;
+        font-weight: 780;
+      }
+
+      .xd-relation-status {
+        margin-top: 3px;
+        color: var(--xd-muted);
+        font-size: 10px;
+      }
+
+      .xd-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 13px;
+      }
+
+      .xd-tag {
+        padding: 6px 9px;
+        border-radius: 999px;
+        background: var(--xd-pink-faint);
+        color: var(--xd-pink-dark);
+        font-size: 9px;
+        font-weight: 700;
+      }
+
+      .xd-empty {
+        text-align: center;
+        padding: 38px 20px;
+        border-radius: 23px;
+        border: 1px dashed rgba(140,104,112,.18);
+        background: rgba(255,255,255,.42);
+      }
+
+      .xd-empty-icon {
+        font-size: 27px;
+        margin-bottom: 9px;
+        opacity: .8;
+      }
+
+      .xd-empty-title {
+        font-size: 15px;
+        font-weight: 780;
+      }
+
+      .xd-empty-text {
+        margin-top: 6px;
+        font-size: 11px;
+        line-height: 1.7;
+        color: var(--xd-muted);
+      }
+
+      .xd-primary {
+        margin-top: 15px;
+        border: 0;
+        border-radius: 15px;
+        padding: 11px 16px;
+        background: #a97983;
+        color: white;
+        font-size: 12px;
+        font-weight: 750;
+        cursor: pointer;
+        box-shadow: 0 7px 18px rgba(132,91,101,.18);
+      }
+
+      .xd-primary:active { transform: scale(.98); }
+
+      .xd-archive {
+        position: relative;
+        padding: 18px;
+        border-radius: 23px;
+        background:
+          linear-gradient(140deg, rgba(255,255,255,.88), rgba(245,229,231,.70));
+        border: 1px solid var(--xd-line);
+        box-shadow: var(--xd-shadow);
+        overflow: hidden;
+      }
+
+      .xd-archive::after {
+        content: "ON AIR";
+        position: absolute;
+        right: -19px;
+        top: 13px;
+        transform: rotate(34deg);
+        padding: 4px 27px;
+        background: rgba(184,135,145,.12);
+        color: var(--xd-pink);
+        font-size: 8px;
+        font-weight: 800;
+        letter-spacing: .18em;
+      }
+
+      .xd-archive-title {
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: -.035em;
+      }
+
+      .xd-archive-meta {
+        margin-top: 6px;
+        font-size: 10px;
+        color: var(--xd-muted);
+      }
+
+      .xd-archive-people {
+        display: flex;
+        margin-top: 15px;
+        align-items: center;
+      }
+
+      .xd-mini-avatar {
+        width: 34px;
+        height: 34px;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #eadbde;
+        border: 2px solid #fffafa;
+        margin-left: -7px;
+        display: grid;
+        place-items: center;
+        color: var(--xd-pink-dark);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .xd-mini-avatar:first-child { margin-left: 0; }
+
+      .xd-mini-avatar img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .xd-archive-summary {
+        margin-top: 13px;
+        color: #76696b;
+        font-size: 11px;
+        line-height: 1.7;
+      }
+
+      .xd-archive-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .xd-small-btn {
+        flex: 1;
+        border: 1px solid rgba(140,104,112,.13);
+        background: rgba(255,255,255,.65);
+        color: var(--xd-pink-dark);
+        border-radius: 13px;
+        padding: 9px;
+        font-size: 10px;
+        font-weight: 720;
+        cursor: pointer;
+      }
+
+      .xd-new-archive {
+        width: 100%;
+        margin-top: 11px;
+        padding: 15px;
+        border-radius: 19px;
+        border: 1px dashed rgba(167,121,131,.25);
+        background: rgba(255,255,255,.36);
+        color: var(--xd-pink-dark);
+        font-size: 12px;
+        font-weight: 750;
+        cursor: pointer;
+      }
+
+      .xd-profile {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 17px;
+        border-radius: 22px;
+        background: rgba(255,255,255,.76);
+        border: 1px solid var(--xd-line);
+      }
+
+      .xd-profile .xd-avatar {
+        width: 62px;
+        height: 62px;
+        flex-basis: 62px;
+        border-radius: 19px;
+      }
+
+      .xd-profile-name {
+        font-size: 17px;
+        font-weight: 800;
+      }
+
+      .xd-profile-handle {
+        margin-top: 3px;
+        color: var(--xd-pink);
+        font-size: 10px;
+      }
+
+      .xd-profile-bio {
+        margin-top: 6px;
+        color: var(--xd-muted);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .xd-modal-wrap {
+        position: absolute;
+        inset: 0;
+        z-index: 100;
+        background: rgba(67,51,55,.20);
+        backdrop-filter: blur(5px);
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+      }
+
+      .xd-modal {
+        width: 100%;
+        max-height: 86%;
+        overflow-y: auto;
+        background: #fbf8f7;
+        border-radius: 28px 28px 0 0;
+        padding: 21px 17px 28px;
+        box-shadow: 0 -12px 45px rgba(72,51,57,.15);
+      }
+
+      .xd-modal-handle {
+        width: 37px;
+        height: 4px;
+        border-radius: 99px;
+        background: #d7c8ca;
+        margin: -5px auto 17px;
+      }
+
+      .xd-modal-title {
+        font-size: 20px;
+        font-weight: 800;
+        letter-spacing: -.03em;
+      }
+
+      .xd-field {
+        margin-top: 15px;
+      }
+
+      .xd-field label {
+        display: block;
+        font-size: 10px;
+        color: var(--xd-muted);
+        font-weight: 700;
+        margin-bottom: 7px;
+      }
+
+      .xd-field input {
+        width: 100%;
+        border: 1px solid rgba(140,104,112,.15);
+        background: white;
+        color: var(--xd-text);
+        border-radius: 14px;
+        padding: 12px;
+        outline: none;
+      }
+
+      .xd-field input:focus {
+        border-color: rgba(184,135,145,.45);
+        box-shadow: 0 0 0 3px rgba(184,135,145,.08);
+      }
+
+      .xd-modal-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 18px;
+      }
+
+      .xd-modal-actions button {
+        flex: 1;
+      }
+
+      @media (min-width: 700px) {
+        .roche-plugin-xindong-xianchang {
+          max-width: 520px;
+          margin: 0 auto;
+          border-left: 1px solid rgba(120,90,96,.08);
+          border-right: 1px solid rgba(120,90,96,.08);
+        }
+      }
+    `;
     document.head.appendChild(style);
   }
 
-  function removeStyle() {
-    var style = document.getElementById(STYLE_ID);
-    if (style) style.parentNode.removeChild(style);
-  }
+  function renderShell() {
+    state.container.innerHTML = `
+      <div class="roche-plugin-xindong-xianchang">
+        <header class="xd-topbar">
+          <button class="xd-back" data-action="back" aria-label="返回 Roche">‹</button>
+          <div class="xd-heading">
+            <div class="xd-eyebrow">LOVE REALITY SHOW</div>
+            <div class="xd-title">心动现场</div>
+          </div>
+          <div class="xd-topday">
+            <span class="xd-topday-main" data-top-day>DAY 01</span>
+            <span class="xd-topday-sub">ON AIR</span>
+          </div>
+        </header>
 
-  // ---------- 顶层渲染调度 ----------
+        <main class="xd-content" data-content></main>
 
-  function render(root, roche, state) {
-    if (!state.archive) {
-      return renderArchiveListScreen(root, roche, state);
-    }
-    if (state.screen === "newArchive") {
-      return renderNewArchiveScreen(root, roche, state);
-    }
-    var body = "";
-    if (state.screen === "show") body = renderShowScreenHtml(state);
-    else if (state.screen === "guestList") body = renderGuestListHtml(state);
-    else if (state.screen === "guestDetail") body = renderGuestDetailHtml(state);
-    else if (state.screen === "privateMessage") body = renderPrivateMessageHtml(state);
-    else if (state.screen === "relationship") body = renderRelationshipHtml(state);
-    else body = renderShowScreenHtml(state);
+        <nav class="xd-bottom" aria-label="心动现场导航">
+          <button class="xd-tab active" data-tab="show">
+            <span class="xd-tab-icon">▣</span>
+            <span class="xd-tab-label">节目</span>
+          </button>
+          <button class="xd-tab" data-tab="guests">
+            <span class="xd-tab-icon">♧</span>
+            <span class="xd-tab-label">嘉宾</span>
+          </button>
+          <button class="xd-tab" data-tab="relations">
+            <span class="xd-tab-icon">♡</span>
+            <span class="xd-tab-label">关系</span>
+          </button>
+          <button class="xd-tab" data-tab="archives">
+            <span class="xd-tab-icon">▤</span>
+            <span class="xd-tab-label">档案</span>
+          </button>
+        </nav>
+      </div>
+    `;
 
-    root.innerHTML =
-      '<div class="xdxc-screen" data-role="screen">' + body + "</div>" +
-      renderTabbarHtml(state);
-  }
-
-  function renderTabbarHtml(state) {
-    var tabs = [
-      { id: "show", icon: "📺", label: "节目" },
-      { id: "guestList", icon: "👥", label: "嘉宾" },
-      { id: "relationship", icon: "💗", label: "关系" },
-      { id: "archiveManage", icon: "📂", label: "档案" }
-    ];
-    var isArchiveManage = state.screen === "archiveManage";
-    var active = isArchiveManage ? "archiveManage" : state.screen;
-    if (["show", "guestList", "guestDetail", "privateMessage"].indexOf(active) !== -1) {
-      if (active === "guestDetail" || active === "privateMessage") active = "guestList";
-    }
-    var html = tabs.map(function (t) {
-      var cls = "xdxc-tab" + (t.id === active ? " active" : "");
-      return '<div class="' + cls + '" data-action="nav-tab" data-tab="' + t.id + '">' + t.icon + "<br/>" + t.label + "</div>";
-    }).join("");
-    return '<div class="xdxc-tabbar">' + html + "</div>";
-  }
-
-  // ---------- 档案列表（初始页面 / 档案 tab） ----------
-
-  async function renderArchiveListScreen(root, roche, state) {
-    var index = await getArchiveIndex(roche);
-    var listHtml = "";
-    if (index.length === 0) {
-      listHtml = '<div class="xdxc-empty">还没有任何恋综档案<br/>点击下方按钮开始第一季</div>';
-    } else {
-      listHtml = index.map(function (item) {
-        var avatarsHtml = (item.characterAvatars || []).slice(0, 3).map(function (a) {
-          return '<img class="xdxc-avatar" style="width:32px;height:32px;" src="' + escapeHtml(a || "") + '" />';
-        }).join("");
-        return (
-          '<div class="xdxc-card" data-action="open-archive" data-id="' + item.archiveId + '">' +
-          '<div class="xdxc-avatar-row">' + avatarsHtml + "</div>" +
-          '<div class="xdxc-card-title">' + escapeHtml(item.title) + "</div>" +
-          '<div class="xdxc-card-sub">DAY ' + item.currentDay + " · " + escapeHtml((item.characterNames || []).join(" / ")) + "</div>" +
-          '<div class="xdxc-card-quote">' + escapeHtml(item.lastSummary || "") + "</div>" +
-          '<div class="xdxc-btn-row">' +
-          '<button class="xdxc-btn secondary" data-action="delete-archive" data-id="' + item.archiveId + '">删除</button>' +
-          "</div></div>"
-        );
-      }).join("");
-    }
-
-    root.innerHTML =
-      '<div class="xdxc-screen" data-role="screen">' +
-      '<div class="xdxc-card-title" style="font-size:18px;margin-bottom:12px;">📂 我的恋综档案</div>' +
-      listHtml +
-      '<button class="xdxc-btn block" data-action="new-archive">＋ 新建一季恋综</button>' +
-      "</div>";
-  }
-
-  // ---------- 新建恋综向导（单页表单，简化流程） ----------
-
-  async function renderNewArchiveScreen(root, roche, state) {
-    if (!state.wizard) {
-      var personas = await roche.persona.getUserPersonas();
-      var chars = await roche.character.list();
-      var worldbookCategories = [];
-      try { worldbookCategories = await roche.worldbook.list(); } catch (e) { worldbookCategories = []; }
-      state.wizard = {
-        personas: personas || [],
-        chars: chars || [],
-        worldbookCategories: worldbookCategories || [],
-        selectedPersonaId: (personas && personas[0] && personas[0].id) || "",
-        selectedCharIds: [],
-        selectedCategoryIds: [],
-        title: "",
-        tone: "自然发展",
-        description: "",
-        forbiddenContent: ""
-      };
-    }
-    var w = state.wizard;
-
-    var personaOptions = w.personas.map(function (p) {
-      var sel = p.id === w.selectedPersonaId ? " selected" : "";
-      return '<option value="' + escapeHtml(p.id) + '"' + sel + ">" + escapeHtml(p.name || p.handle || p.id) + "</option>";
-    }).join("");
-
-    var charRows = w.chars.map(function (c) {
-      var checked = w.selectedCharIds.indexOf(c.id) !== -1 ? " checked" : "";
-      return (
-        '<div class="xdxc-checkbox-row">' +
-        '<input type="checkbox" data-role="char-check" data-id="' + escapeHtml(c.id) + '"' + checked + " />" +
-        "<label>" + escapeHtml(c.handle || c.name) + "</label>" +
-        "</div>"
-      );
-    }).join("");
-
-    var categoryRows = w.worldbookCategories.map(function (cat) {
-      var checked = w.selectedCategoryIds.indexOf(cat.id) !== -1 ? " checked" : "";
-      return (
-        '<div class="xdxc-checkbox-row">' +
-        '<input type="checkbox" data-role="wb-check" data-id="' + escapeHtml(cat.id) + '"' + checked + " />" +
-        "<label>" + escapeHtml(cat.name || cat.id) + "</label>" +
-        "</div>"
-      );
-    }).join("");
-
-    root.innerHTML =
-      '<div class="xdxc-screen" data-role="screen">' +
-      '<div class="xdxc-topbar-left" data-action="cancel-new-archive" style="margin-bottom:12px;">‹ 返回</div>' +
-      '<div class="xdxc-card-title" style="font-size:18px;margin-bottom:16px;">新建一季恋综</div>' +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">恋综名称</label>' +
-      '<input type="text" data-role="input-title" value="' + escapeHtml(w.title) + '" placeholder="例如：心动小屋" />' +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">👤 你的人设</label>' +
-      '<select data-role="select-persona">' + personaOptions + "</select>" +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">👥 选择嘉宾（至少 1 位）</label>' +
-      charRows +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">🌍 世界书分类（可不选）</label>' +
-      (categoryRows || '<div class="xdxc-card-sub">暂无世界书分类</div>') +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">🎬 本季玩法 / 剧情设定</label>' +
-      '<textarea data-role="input-description" placeholder="例如：这一季主打甜宠，节奏偏慢热">' + escapeHtml(w.description) + "</textarea>" +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">节目氛围</label>' +
-      '<select data-role="select-tone">' +
-      ["温情向", "狗血向", "搞笑向", "自然发展"].map(function (t) {
-        return '<option value="' + t + '"' + (t === w.tone ? " selected" : "") + ">" + t + "</option>";
-      }).join("") +
-      "</select>" +
-      "</div>" +
-
-      '<div class="xdxc-form-group">' +
-      '<label class="xdxc-form-label">禁止出现的内容（可不填）</label>' +
-      '<textarea data-role="input-forbidden" placeholder="例如：不要出现暴力情节">' + escapeHtml(w.forbiddenContent) + "</textarea>" +
-      "</div>" +
-
-      '<button class="xdxc-btn block" data-action="confirm-new-archive">开始这一季恋综</button>' +
-      "</div>";
-  }
-
-  async function collectWorldbookSnapshot(roche, categoryIds) {
-    if (!categoryIds || categoryIds.length === 0) return "";
-    var parts = [];
-    for (var i = 0; i < categoryIds.length; i++) {
-      try {
-        var entries = await roche.worldbook.getEntries({ categoryId: categoryIds[i] });
-        (entries || []).forEach(function (entry) {
-          var text = entry.content || entry.text || entry.summary || "";
-          if (text) parts.push(text);
-        });
-      } catch (e) {}
-    }
-    return parts.join("\n\n");
-  }
-
-  async function confirmNewArchive(roche, state) {
-    var w = state.wizard;
-    if (!w.title) { roche.ui.toast("请填写恋综名称"); return; }
-    if (w.selectedCharIds.length === 0) { roche.ui.toast("请至少选择一位嘉宾"); return; }
-
-    var persona = null;
-    for (var i = 0; i < w.personas.length; i++) {
-      if (w.personas[i].id === w.selectedPersonaId) { persona = w.personas[i]; break; }
-    }
-    if (!persona) { roche.ui.toast("请选择你的人设"); return; }
-
-    var characters = [];
-    for (var j = 0; j < w.selectedCharIds.length; j++) {
-      var full = await roche.character.get(w.selectedCharIds[j]);
-      characters.push({
-        characterId: full.id,
-        name: full.name,
-        handle: full.handle,
-        avatar: full.avatar,
-        bio: full.bio,
-        personaSnapshot: full.persona || full.bio || "",
-        joinedDay: 1,
-        isNewGuest: false
+    state.container
+      .querySelectorAll("[data-tab]")
+      .forEach((button) => {
+        const handler = () => {
+          state.activeTab = button.dataset.tab;
+          renderPage();
+        };
+        button.addEventListener("click", handler);
+        state.listeners.push(() => button.removeEventListener("click", handler));
       });
-    }
 
-    var worldbookSnapshot = await collectWorldbookSnapshot(roche, w.selectedCategoryIds);
-
-    var archive = createNewArchive({
-      title: w.title,
-      userPersona: {
-        personaId: persona.id,
-        name: persona.name,
-        handle: persona.handle,
-        avatar: persona.avatar,
-        personaSnapshot: persona.persona || persona.bio || ""
-      },
-      characters: characters,
-      worldbook: {
-        selectedCategoryIds: w.selectedCategoryIds,
-        selectedEntryIds: [],
-        snapshotText: worldbookSnapshot
-      },
-      seasonConfig: {
-        description: w.description,
-        tone: w.tone,
-        forbiddenContent: w.forbiddenContent
-      }
-    });
-
-    await saveArchive(archive, roche);
-    state.archive = archive;
-    state.screen = "show";
-    state.wizard = null;
-  }
-  // ---------- 📺 节目页面 ----------
-
-  function renderShowScreenHtml(state) {
-    var archive = state.archive;
-    var lastResult = state.lastResult || {};
-    var narrativeText = "";
-    var dayEntry = null;
-    for (var i = 0; i < archive.timeline.length; i++) {
-      if (archive.timeline[i].day === archive.currentDay) { dayEntry = archive.timeline[i]; break; }
-    }
-    narrativeText = dayEntry ? dayEntry.fullNarrative : "";
-
-    var charActionsHtml = "";
-    if (lastResult.charActions && lastResult.charActions.length) {
-      charActionsHtml = '<div class="xdxc-char-actions">' + lastResult.charActions.map(function (a) {
-        return '<div class="xdxc-char-action">· ' + escapeHtml(a.displayName || "") + " " + escapeHtml(a.action || "") + "</div>";
-      }).join("") + "</div>";
-    }
-
-    var danmuHtml = "";
-    if (state.settings.danmuEnabled && lastResult.danmu && lastResult.danmu.length) {
-      danmuHtml = '<div class="xdxc-danmu-layer" data-role="danmu-layer">' +
-        lastResult.danmu.map(function (text, idx) {
-          var name = pickDanmuName();
-          var top = 10 + (idx * 22) % 90;
-          var delay = idx * 0.6;
-          return '<div class="xdxc-danmu-item" style="top:' + top + '%;animation-delay:' + delay + 's;">' +
-            escapeHtml(name) + "：" + escapeHtml(text) + "</div>";
-        }).join("") +
-        "</div>";
-    }
-
-    var eventsHtml = "";
-    var todaysEvents = archive.events.filter(function (e) { return e.day === archive.currentDay; });
-    if (todaysEvents.length) {
-      eventsHtml = '<div class="xdxc-events">' + todaysEvents.map(function (e) {
-        return '<div class="xdxc-event-card"><div class="xdxc-event-title">' + escapeHtml(e.title || "") + "</div><div>" + escapeHtml(e.detail || "") + "</div></div>";
-      }).join("") + "</div>";
-    }
-
-    var choices = lastResult.choices || [];
-    var choicesHtml = choices.map(function (c) {
-      return '<button class="xdxc-choice-btn" data-action="pick-choice" data-text="' + escapeHtml(c.text) + '">' + escapeHtml(c.text) + "</button>";
-    }).join("");
-
-    var loadingHtml = archive.pendingRequest ? '<div class="xdxc-loading">剧情生成中...</div>' : "";
-
-    return (
-      '<div class="xdxc-topbar" style="margin:-12px -12px 12px -12px;">' +
-      '<div class="xdxc-topbar-left" data-action="back-to-archive-list">‹ 返回</div>' +
-      '<div class="xdxc-topbar-mid">' +
-      '<div class="xdxc-title">' + escapeHtml(archive.title) + " DAY" + String(archive.currentDay).padStart(2, "0") + "</div>" +
-      '<div class="xdxc-sub">● ON AIR · ' + escapeHtml(archive.currentTime) + "</div>" +
-      "</div>" +
-      '<div class="xdxc-topbar-right"><span data-action="manual-save">💾</span></div>' +
-      "</div>" +
-
-      '<div class="xdxc-scene-box">' +
-      danmuHtml +
-      '<div class="xdxc-scene-label">' + escapeHtml(archive.currentSceneLabel) + "</div>" +
-      '<div class="xdxc-narrative">' + escapeHtml(narrativeText || "故事即将开始...") + "</div>" +
-      charActionsHtml +
-      "</div>" +
-
-      eventsHtml +
-      loadingHtml +
-
-      '<div class="xdxc-choices">' +
-      choicesHtml +
-      '<div class="xdxc-custom-box">' +
-      '<textarea data-role="custom-action-input" placeholder="✎ 自定义剧情走向..."></textarea>' +
-      '<button class="xdxc-btn" data-action="submit-custom-action">发送</button>' +
-      "</div>" +
-      "</div>"
-    );
-  }
-
-  // ---------- 👥 嘉宾列表页面 ----------
-
-  function renderGuestListHtml(state) {
-    var archive = state.archive;
-    var cardsHtml = archive.characters.map(function (c) {
-      var rel = archive.relationships.userToChar[c.characterId] || { tags: [] };
-      var tagsHtml = rel.tags.slice(0, 3).map(function (t) {
-        return '<span class="xdxc-tag">' + escapeHtml(t) + "</span>";
-      }).join("");
-      var joinedNote = c.isNewGuest ? "DAY" + c.joinedDay + " 中途加入" : "DAY01 加入";
-      return (
-        '<div class="xdxc-card" data-action="open-guest-detail" data-id="' + escapeHtml(c.characterId) + '">' +
-        '<div style="display:flex;align-items:center;gap:10px;">' +
-        '<img class="xdxc-avatar" src="' + escapeHtml(c.avatar || "") + '" />' +
-        "<div>" +
-        '<div class="xdxc-card-title">' + escapeHtml(c.handle || c.name) + "</div>" +
-        '<div class="xdxc-card-sub">' + escapeHtml(joinedNote) + "</div>" +
-        "</div></div>" +
-        '<div style="margin-top:8px;">' + (tagsHtml || '<span class="xdxc-card-sub">暂无互动</span>') + "</div>" +
-        "</div>"
-      );
-    }).join("");
-
-    return (
-      '<div class="xdxc-card-title" style="font-size:18px;margin-bottom:12px;">👥 本季嘉宾</div>' +
-      cardsHtml +
-      '<button class="xdxc-btn block secondary" data-action="add-guest">＋ 新嘉宾入住</button>'
-    );
-  }
-
-  async function renderAddGuestPicker(root, roche, state) {
-    var allChars = await roche.character.list();
-    var existingIds = state.archive.characters.map(function (c) { return c.characterId; });
-    var candidates = (allChars || []).filter(function (c) { return existingIds.indexOf(c.id) === -1; });
-
-    var rowsHtml = candidates.map(function (c) {
-      return (
-        '<div class="xdxc-card" data-action="confirm-add-guest" data-id="' + escapeHtml(c.id) + '">' +
-        '<div style="display:flex;align-items:center;gap:10px;">' +
-        '<img class="xdxc-avatar" src="' + escapeHtml(c.avatar || "") + '" />' +
-        '<div class="xdxc-card-title">' + escapeHtml(c.handle || c.name) + "</div>" +
-        "</div></div>"
-      );
-    }).join("");
-
-    root.querySelector('[data-role="screen"]').innerHTML =
-      '<div class="xdxc-topbar-left" data-action="cancel-add-guest" style="margin-bottom:12px;">‹ 返回</div>' +
-      '<div class="xdxc-card-title" style="font-size:16px;margin-bottom:12px;">选择新嘉宾</div>' +
-      (rowsHtml || '<div class="xdxc-empty">没有更多可加入的角色了</div>');
-  }
-
-  // ---------- 👤 嘉宾详情页面 ----------
-
-  function renderGuestDetailHtml(state) {
-    var c = null;
-    for (var i = 0; i < state.archive.characters.length; i++) {
-      if (state.archive.characters[i].characterId === state.currentGuestId) { c = state.archive.characters[i]; break; }
-    }
-    if (!c) return '<div class="xdxc-empty">未找到该嘉宾</div>';
-
-    var rel = state.archive.relationships.userToChar[c.characterId] || { tags: [], milestones: [], statusLine: "" };
-    var tagsHtml = rel.tags.map(function (t) { return '<span class="xdxc-tag">' + escapeHtml(t) + "</span>"; }).join("");
-    var lastMilestone = rel.milestones.length ? rel.milestones[rel.milestones.length - 1] : null;
-
-    return (
-      '<div class="xdxc-topbar-left" data-action="back-to-guest-list" style="margin-bottom:12px;">‹ 返回</div>' +
-      '<div style="text-align:center;margin-bottom:16px;">' +
-      '<img class="xdxc-avatar" style="width:80px;height:80px;" src="' + escapeHtml(c.avatar || "") + '" />' +
-      '<div class="xdxc-card-title" style="margin-top:8px;">' + escapeHtml(c.name) + (c.handle ? " (@" + escapeHtml(c.handle) + ")" : "") + "</div>" +
-      '<div class="xdxc-card-sub">' + escapeHtml(c.bio || "") + "</div>" +
-      "</div>" +
-      '<div class="xdxc-card">' +
-      '<div class="xdxc-card-sub">' + (c.isNewGuest ? "DAY" + c.joinedDay + " 中途加入本季" : "DAY01 加入本季恋综") + "</div>" +
-      "<div style='margin:8px 0;'>" + (tagsHtml || '<span class="xdxc-card-sub">暂无关系标签</span>') + "</div>" +
-      '<div class="xdxc-card-quote">' + escapeHtml(rel.statusLine || "") + "</div>" +
-      (lastMilestone ? '<div class="xdxc-card-sub" style="margin-top:8px;">最近互动：DAY' + lastMilestone.day + " · " + escapeHtml(lastMilestone.event) + "</div>" : "") +
-      "</div>" +
-      '<button class="xdxc-btn block" data-action="open-private-message" data-id="' + escapeHtml(c.characterId) + '">💬 私信</button>'
-    );
-  }
-
-  // ---------- 💬 私信页面 ----------
-
-  function renderPrivateMessageHtml(state) {
-    var c = null;
-    for (var i = 0; i < state.archive.characters.length; i++) {
-      if (state.archive.characters[i].characterId === state.currentGuestId) { c = state.archive.characters[i]; break; }
-    }
-    if (!c) return '<div class="xdxc-empty">未找到该嘉宾</div>';
-
-    var thread = state.archive.privateMessages[c.characterId] || { messages: [] };
-    var bubblesHtml = thread.messages.map(function (m) {
-      var cls = m.role === "user" ? "user" : "char";
-      return '<div class="xdxc-bubble ' + cls + '">' + escapeHtml(m.text) + "</div>";
-    }).join("");
-
-    var loadingHtml = state.pmSending ? '<div class="xdxc-loading">对方正在输入...</div>' : "";
-
-    return (
-      '<div class="xdxc-topbar-left" data-action="back-to-guest-detail" style="margin-bottom:12px;">‹ 返回</div>' +
-      '<div class="xdxc-card-title" style="margin-bottom:12px;">与 ' + escapeHtml(c.handle || c.name) + " 的私信</div>" +
-      '<div class="xdxc-chat-list">' + bubblesHtml + "</div>" +
-      loadingHtml +
-      '<div class="xdxc-custom-box" style="margin-top:12px;">' +
-      '<textarea data-role="pm-input" placeholder="输入私信内容..."></textarea>' +
-      '<button class="xdxc-btn" data-action="send-pm">发送</button>' +
-      "</div>"
-    );
-  }
-
-  // ---------- 💗 关系页面 ----------
-
-  function renderRelationshipHtml(state) {
-    var archive = state.archive;
-    var sub = state.relationshipSubTab || "user";
-
-    var tabsHtml =
-      '<div class="xdxc-btn-row" style="margin-bottom:12px;">' +
-      '<button class="xdxc-btn' + (sub === "user" ? "" : " secondary") + '" data-action="rel-sub-tab" data-sub="user">与你的关系</button>' +
-      '<button class="xdxc-btn' + (sub === "char" ? "" : " secondary") + '" data-action="rel-sub-tab" data-sub="char">嘉宾之间</button>' +
-      "</div>";
-
-    var bodyHtml = "";
-    if (sub === "user") {
-      var userEntries = Object.keys(archive.relationships.userToChar);
-      if (userEntries.length === 0) {
-        bodyHtml = '<div class="xdxc-empty">还没有任何关系发展</div>';
-      } else {
-        bodyHtml = userEntries.map(function (charId) {
-          var rel = archive.relationships.userToChar[charId];
-          var c = null;
-          for (var i = 0; i < archive.characters.length; i++) {
-            if (archive.characters[i].characterId === charId) { c = archive.characters[i]; break; }
-          }
-          if (!c) return "";
-          var tagsHtml = rel.tags.map(function (t) { return '<span class="xdxc-tag">' + escapeHtml(t) + "</span>"; }).join("");
-          var lastMilestone = rel.milestones.length ? rel.milestones[rel.milestones.length - 1] : null;
-          return (
-            '<div class="xdxc-card">' +
-            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">' +
-            '<img class="xdxc-avatar" src="' + escapeHtml(c.avatar || "") + '" />' +
-            '<div class="xdxc-card-title">' + escapeHtml(c.handle || c.name) + "</div>" +
-            "</div>" +
-            (tagsHtml || '<span class="xdxc-card-sub">暂无标签</span>') +
-            '<div class="xdxc-card-quote" style="margin-top:8px;">' + escapeHtml(rel.statusLine || "") + "</div>" +
-            (lastMilestone ? '<div class="xdxc-card-sub" style="margin-top:6px;">最近事件：DAY' + lastMilestone.day + " · " + escapeHtml(lastMilestone.event) + "</div>" : "") +
-            "</div>"
-          );
-        }).join("");
-      }
-    } else {
-      var charEntries = Object.keys(archive.relationships.charToChar);
-      if (charEntries.length === 0) {
-        bodyHtml = '<div class="xdxc-empty">嘉宾之间暂无产生过关系动态</div>';
-      } else {
-        bodyHtml = charEntries.map(function (pairKey) {
-          var rel = archive.relationships.charToChar[pairKey];
-          var ids = pairKey.split("_");
-          var names = ids.map(function (id) {
-            for (var i = 0; i < archive.characters.length; i++) {
-              if (archive.characters[i].characterId === id) return archive.characters[i].handle || archive.characters[i].name;
-            }
-            return id;
-          });
-          var tagsHtml = rel.tags.map(function (t) { return '<span class="xdxc-tag">' + escapeHtml(t) + "</span>"; }).join("");
-          var lastMilestone = rel.milestones.length ? rel.milestones[rel.milestones.length - 1] : null;
-          return (
-            '<div class="xdxc-card">' +
-            '<div class="xdxc-card-title">' + escapeHtml(names[0] || "") + " ⇄ " + escapeHtml(names[1] || "") + "</div>" +
-            '<div style="margin:6px 0;">' + (tagsHtml || '<span class="xdxc-card-sub">暂无标签</span>') + "</div>" +
-            (lastMilestone ? '<div class="xdxc-card-sub">最近事件：DAY' + lastMilestone.day + " · " + escapeHtml(lastMilestone.event) + "</div>" : "") +
-            "</div>"
-          );
-        }).join("");
-      }
-    }
-
-    return (
-      '<div class="xdxc-card-title" style="font-size:18px;margin-bottom:12px;">💗 关系</div>' +
-      tabsHtml +
-      bodyHtml
-    );
-  }
-
-  // ---------- 事件绑定与主流程 ----------
-
-  function bindEvents(root, roche, state, rerender) {
-    root.onclick = async function (ev) {
-      var el = ev.target.closest("[data-action]");
-      if (!el) return;
-      var action = el.getAttribute("data-action");
-
+    const back = state.container.querySelector("[data-action='back']");
+    const backHandler = () => {
       try {
-        if (action === "new-archive") {
-          state.screen = "newArchive";
-          state.wizard = null;
-          await rerender();
-        } else if (action === "cancel-new-archive") {
-          state.wizard = null;
-          state.screen = null;
-          await rerender();
-        } else if (action === "confirm-new-archive") {
-          await confirmNewArchive(roche, state);
-          await rerender();
-        } else if (action === "open-archive") {
-          var id = el.getAttribute("data-id");
-          state.archive = await loadArchive(roche, id);
-          state.screen = "show";
-          state.lastResult = null;
-          await rerender();
-        } else if (action === "delete-archive") {
-          ev.stopPropagation();
-          var delId = el.getAttribute("data-id");
-          var ok = await roche.ui.confirm({ title: "删除档案", message: "确定要删除这个恋综档案吗？此操作无法撤销。" });
-          if (ok) {
-            await deleteArchiveData(roche, delId);
-            await rerender();
-          }
-        } else if (action === "back-to-archive-list") {
-          state.archive = null;
-          state.screen = null;
-          await rerender();
-        } else if (action === "nav-tab") {
-          var tab = el.getAttribute("data-tab");
-          if (tab === "archiveManage") {
-            state.archive = null;
-            state.screen = null;
-          } else {
-            state.screen = tab;
-          }
-          await rerender();
-        } else if (action === "manual-save") {
-          await saveArchive(state.archive, roche);
-          roche.ui.toast("✓ 已保存 DAY" + String(state.archive.currentDay).padStart(2, "0") + " · " + state.archive.currentTime);
-        } else if (action === "pick-choice") {
-          var text = el.getAttribute("data-text");
-          await runStoryAction(roche, state, rerender, text);
-        } else if (action === "submit-custom-action") {
-          var input = root.querySelector('[data-role="custom-action-input"]');
-          var val = input ? input.value.trim() : "";
-          if (!val) { roche.ui.toast("请输入内容"); return; }
-          await runStoryAction(roche, state, rerender, val);
-        } else if (action === "open-guest-detail") {
-          state.currentGuestId = el.getAttribute("data-id");
-          state.screen = "guestDetail";
-          await rerender();
-        } else if (action === "back-to-guest-list") {
-          state.screen = "guestList";
-          await rerender();
-        } else if (action === "open-private-message") {
-          state.currentGuestId = el.getAttribute("data-id");
-          state.screen = "privateMessage";
-          await rerender();
-        } else if (action === "back-to-guest-detail") {
-          state.screen = "guestDetail";
-          await rerender();
-        } else if (action === "send-pm") {
-          var pmInput = root.querySelector('[data-role="pm-input"]');
-          var pmVal = pmInput ? pmInput.value.trim() : "";
-          if (!pmVal) { roche.ui.toast("请输入内容"); return; }
-          state.pmSending = true;
-          await rerender();
-          try {
-            await sendPrivateMessage(state.archive, roche, state.currentGuestId, pmVal);
-          } catch (e) {
-            roche.ui.toast("发送失败，请重试");
-          }
-          state.pmSending = false;
-          await rerender();
-        } else if (action === "rel-sub-tab") {
-          state.relationshipSubTab = el.getAttribute("data-sub");
-          await rerender();
-        } else if (action === "add-guest") {
-          await renderAddGuestPicker(root, roche, state);
-        } else if (action === "cancel-add-guest") {
-          await rerender();
-        } else if (action === "confirm-add-guest") {
-          var newCharId = el.getAttribute("data-id");
-          await addNewGuestToArchive(state.archive, roche, newCharId);
-          state.screen = "guestList";
-          roche.ui.toast("新嘉宾已加入");
-          await rerender();
-        }
-      } catch (err) {
-        roche.ui.toast("操作失败：" + (err && err.message ? err.message : "未知错误"));
+        state.roche.ui.closeApp();
+      } catch {
+        toast("无法返回 Roche");
       }
     };
+    back.addEventListener("click", backHandler);
+    state.listeners.push(() => back.removeEventListener("click", backHandler));
   }
 
-  async function runStoryAction(roche, state, rerender, actionText) {
-    if (state.archive.pendingRequest) {
-      roche.ui.toast("剧情正在生成，请稍候");
-      return;
+  function avatarHTML(item, className = "xd-avatar") {
+    const src = avatar(item);
+    if (src) {
+      return `<div class="${className}"><img src="${escapeHTML(src)}" alt=""></div>`;
     }
-    await rerender();
+    const text = escapeHTML((realName(item, "♡")).slice(0, 1));
+    return `<div class="${className}">${text}</div>`;
+  }
+
+  function pageHead(kicker, title, note = "") {
+    return `
+      <div class="xd-kicker">${escapeHTML(kicker)}</div>
+      <div class="xd-section-head" style="margin-top:5px;">
+        <div class="xd-section-title">${escapeHTML(title)}</div>
+        ${note ? `<div class="xd-section-note">${escapeHTML(note)}</div>` : ""}
+      </div>
+    `;
+  }
+
+  function renderShow() {
+    const archive = state.currentArchive;
+    const day = archive?.currentDay || 1;
+    const scene = archive?.currentSceneLabel || "心动小屋 · 客厅";
+    const narrative = archive?.lastNarrative ||
+      "夕阳落进客厅的玻璃窗。节目组没有宣布新的任务，空气却比往常安静了一些。几个人各自做着手里的事，偶尔的目光交错，让今晚显得格外微妙。";
+    const quote = archive?.lastQuote ||
+      "“你今天……好像一直在看我。”";
+
+    return `
+      <div class="xd-page">
+        ${pageHead("TONIGHT · LIVE", "正在播出", "实时节目现场")}
+
+        <section class="xd-hero">
+          <div class="xd-kicker">EPISODE ${String(day).padStart(2, "0")}</div>
+          <div class="xd-hero-title">${escapeHTML(archive?.title || "心动小屋")}</div>
+          <div class="xd-hero-sub">
+            一场关于靠近、试探与心动的真人秀。
+            没有人知道下一秒谁会先动心。
+          </div>
+          <div class="xd-live"><span class="xd-live-dot"></span> LIVE · ${escapeHTML(scene)}</div>
+        </section>
+
+        <div class="xd-section-head">
+          <div class="xd-section-title">今晚的现场</div>
+          <div class="xd-section-note">DAY ${String(day).padStart(2, "0")} · ${escapeHTML(archive?.currentTime || "20:36")}</div>
+        </div>
+
+        <section class="xd-scene">
+          <div class="xd-scene-label">${escapeHTML(scene)}</div>
+          <div class="xd-narrative">${escapeHTML(narrative)}</div>
+          <div class="xd-quote">${escapeHTML(quote)}</div>
+        </section>
+
+        <div class="xd-section-head">
+          <div class="xd-section-title">你会怎么做？</div>
+          <div class="xd-section-note">没有标准答案</div>
+        </div>
+
+        <div class="xd-choice-grid">
+          <button class="xd-choice" data-choice="1">
+            <span class="xd-choice-no">01</span>抬起眼，直接回应他的目光。
+          </button>
+          <button class="xd-choice" data-choice="2">
+            <span class="xd-choice-no">02</span>若无其事地转身，把话题带向别处。
+          </button>
+          <button class="xd-choice" data-choice="3">
+            <span class="xd-choice-no">03</span>笑了一下，反过来问他为什么这么说。
+          </button>
+        </div>
+
+        <div class="xd-section-head">
+          <div class="xd-section-title">观众席</div>
+          <div class="xd-section-note">LIVE DANMU</div>
+        </div>
+
+        <div class="xd-danmu">
+          <span>这气氛突然不对劲了</span>
+          <span>救命谁先移开视线</span>
+          <span>节目组你最好有事</span>
+          <span>我已经开始期待了</span>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderGuests() {
+    const chars = state.characters || [];
+
+    return `
+      <div class="xd-page">
+        ${pageHead("THE CAST", "本季嘉宾", `${chars.length} 位已加入`)}
+
+        <div class="xd-profile">
+          ${avatarHTML(state.user)}
+          <div>
+            <div class="xd-profile-name">${escapeHTML(realName(state.user, "我的人设"))}</div>
+            <div class="xd-profile-handle">${escapeHTML(state.user?.handle ? "@" + state.user.handle : "USER")}</div>
+            <div class="xd-profile-bio">${escapeHTML(state.user?.bio || "本季恋综玩家")}</div>
+          </div>
+        </div>
+
+        <div class="xd-section-head">
+          <div class="xd-section-title">入住嘉宾</div>
+          <div class="xd-section-note">LOCKED PERSONA</div>
+        </div>
+
+        <div class="xd-card-grid">
+          ${
+            chars.length
+              ? chars.map((char) => `
+                <div class="xd-guest-card" data-guest-id="${escapeHTML(char.id)}">
+                  ${avatarHTML(char)}
+                  <div class="xd-guest-main">
+                    <div class="xd-guest-name">${escapeHTML(realName(char))}</div>
+                    <div class="xd-guest-handle">${escapeHTML(char.handle ? "@" + char.handle : "嘉宾")}</div>
+                    <div class="xd-guest-bio">${escapeHTML(char.bio || "这个人没有留下简介。")}</div>
+                  </div>
+                  <div class="xd-arrow">›</div>
+                </div>
+              `).join("")
+              : `
+                <div class="xd-empty">
+                  <div class="xd-empty-icon">♡</div>
+                  <div class="xd-empty-title">还没有嘉宾</div>
+                  <div class="xd-empty-text">创建恋综档案后，从 Roche 角色中选择你的入住嘉宾。</div>
+                </div>
+              `
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  function renderRelations() {
+    const chars = state.characters || [];
+    const relations = state.currentArchive?.relationships?.userToChar || {};
+
+    return `
+      <div class="xd-page">
+        ${pageHead("RELATIONSHIP", "关系温度", "只记录故事留下的痕迹")}
+
+        <div class="xd-hero" style="min-height:150px;padding:19px;">
+          <div class="xd-kicker">NO SCORE · NO ANSWER</div>
+          <div class="xd-hero-title" style="font-size:25px;">心动没有刻度。</div>
+          <div class="xd-hero-sub">
+            这里不会告诉你谁“好感度最高”。
+            关系只会随着节目里真正发生的事慢慢改变。
+          </div>
+        </div>
+
+        <div class="xd-section-head">
+          <div class="xd-section-title">USER × 嘉宾</div>
+          <div class="xd-section-note">${chars.length} 条关系线</div>
+        </div>
+
+        <div class="xd-card-grid">
+          ${
+            chars.length
+              ? chars.map((char) => {
+                  const relation = relations[char.id] || { tags: [], statusLine: "" };
+                  const tags = relation.tags?.length ? relation.tags : ["尚未定义"];
+                  return `
+                    <div class="xd-relation">
+                      <div class="xd-relation-top">
+                        ${avatarHTML(char)}
+                        <div class="xd-relation-names">
+                          <div class="xd-relation-name">${escapeHTML(realName(char))}</div>
+                          <div class="xd-relation-status">${escapeHTML(relation.statusLine || "你们的故事才刚刚开始。")}</div>
+                        </div>
+                      </div>
+                      <div class="xd-tags">
+                        ${tags.map(t => `<span class="xd-tag">${escapeHTML(t)}</span>`).join("")}
+                      </div>
+                    </div>
+                  `;
+                }).join("")
+              : `
+                <div class="xd-empty">
+                  <div class="xd-empty-icon">♡</div>
+                  <div class="xd-empty-title">关系线尚未展开</div>
+                  <div class="xd-empty-text">先邀请一些嘉宾进入你的恋综吧。</div>
+                </div>
+              `
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  function renderArchives() {
+    return `
+      <div class="xd-page">
+        ${pageHead("YOUR SHOWS", "恋综档案", `${state.archives.length} 个世界`)}
+
+        <div class="xd-empty" style="padding:27px 18px;margin-bottom:11px;">
+          <div class="xd-empty-icon">✦</div>
+          <div class="xd-empty-title">一个档案，就是一个完整世界</div>
+          <div class="xd-empty-text">
+            不同恋综之间的人设、剧情、关系和记忆彼此独立。
+          </div>
+        </div>
+
+        <div class="xd-card-grid">
+          ${
+            state.archives.length
+              ? state.archives.map((archive) => `
+                <article class="xd-archive">
+                  <div class="xd-archive-title">${escapeHTML(archive.title)}</div>
+                  <div class="xd-archive-meta">
+                    DAY ${String(archive.currentDay || 1).padStart(2, "0")} ·
+                    ${escapeHTML((archive.characterNames || []).length + " 位嘉宾")}
+                  </div>
+                  <div class="xd-archive-people">
+                    ${(archive.characterAvatars || []).slice(0, 5).map((src, i) =>
+                      src
+                        ? `<div class="xd-mini-avatar"><img src="${escapeHTML(src)}" alt=""></div>`
+                        : `<div class="xd-mini-avatar">${i + 1}</div>`
+                    ).join("")}
+                  </div>
+                  <div class="xd-archive-summary">
+                    ${escapeHTML(archive.lastSummary || "还没有发生故事。")}
+                  </div>
+                  <div class="xd-archive-actions">
+                    <button class="xd-small-btn" data-open-archive="${escapeHTML(archive.archiveId)}">进入档案</button>
+                    <button class="xd-small-btn" data-delete-archive="${escapeHTML(archive.archiveId)}">删除</button>
+                  </div>
+                </article>
+              `).join("")
+              : ""
+          }
+        </div>
+
+        <button class="xd-new-archive" data-new-archive>＋ 创建新的恋综世界</button>
+      </div>
+    `;
+  }
+
+  function renderPage() {
+    const content = state.container.querySelector("[data-content]");
+    if (!content) return;
+
+    content.innerHTML =
+      state.activeTab === "show" ? renderShow() :
+      state.activeTab === "guests" ? renderGuests() :
+      state.activeTab === "relations" ? renderRelations() :
+      renderArchives();
+
+    state.container.querySelectorAll("[data-choice]").forEach((button) => {
+      const handler = () => {
+        const choice = button.dataset.choice;
+        const messages = [
+          "你选择了正面回应。真正的剧情引擎将在下一版接管这一动作。",
+          "你选择了暂时回避。真正的剧情引擎将在下一版接管这一动作。",
+          "你选择了反问试探。真正的剧情引擎将在下一版接管这一动作."
+        ];
+        if (state.currentArchive) {
+          state.currentArchive.lastNarrative = messages[Number(choice) - 1];
+          state.currentArchive.lastQuote = "“原来你真的注意到了。”";
+          saveCurrentArchive();
+          renderPage();
+        } else {
+          toast("请先创建一个恋综档案");
+        }
+      };
+      button.addEventListener("click", handler);
+      state.listeners.push(() => button.removeEventListener("click", handler));
+    });
+
+    state.container.querySelectorAll("[data-new-archive]").forEach((button) => {
+      const handler = () => openCreateArchive();
+      button.addEventListener("click", handler);
+      state.listeners.push(() => button.removeEventListener("click", handler));
+    });
+
+    state.container.querySelectorAll("[data-open-archive]").forEach((button) => {
+      const handler = async () => {
+        const archive = state.archives.find(a => a.archiveId === button.dataset.openArchive);
+        if (!archive) return;
+        const full = await safeGet(`archive:${archive.archiveId}`, null);
+        state.currentArchive = full || archive;
+        state.activeTab = "show";
+        renderPage();
+        updateTopDay();
+      };
+      button.addEventListener("click", handler);
+      state.listeners.push(() => button.removeEventListener("click", handler));
+    });
+
+    state.container.querySelectorAll("[data-delete-archive]").forEach((button) => {
+      const handler = async () => {
+        const id = button.dataset.deleteArchive;
+        let ok = true;
+        try {
+          ok = await state.roche.ui.confirm({
+            title: "删除恋综档案",
+            message: "确定删除这个完整恋综世界吗？此操作无法恢复。"
+          });
+        } catch {}
+        if (!ok) return;
+
+        state.archives = state.archives.filter(a => a.archiveId !== id);
+        await safeSet("archiveIndex", state.archives);
+        try { await state.roche.storage.delete(`archive:${id}`); } catch {}
+        if (state.currentArchive?.archiveId === id) state.currentArchive = null;
+        toast("档案已删除");
+        renderPage();
+        updateTopDay();
+      };
+      button.addEventListener("click", handler);
+      state.listeners.push(() => button.removeEventListener("click", handler));
+    });
+
+    state.container.querySelectorAll("[data-guest-id]").forEach((card) => {
+      const handler = () => {
+        const char = state.characters.find(c => c.id === card.dataset.guestId);
+        if (char) openGuestDetail(char);
+      };
+      card.addEventListener("click", handler);
+      state.listeners.push(() => card.removeEventListener("click", handler));
+    });
+
+    state.container.querySelectorAll("[data-tab]").forEach((button) => {
+      button.classList.toggle("active", button.dataset.tab === state.activeTab);
+    });
+  }
+
+  function updateTopDay() {
+    const el = state.container.querySelector("[data-top-day]");
+    if (el) {
+      el.textContent = `DAY ${String(state.currentArchive?.currentDay || 1).padStart(2, "0")}`;
+    }
+  }
+
+  function closeModal() {
+    const modal = state.container.querySelector(".xd-modal-wrap");
+    if (modal) modal.remove();
+  }
+
+  function openGuestDetail(char) {
+    const persona = char.persona || char.bio || "暂无可展示的人设简介。";
+    const modal = document.createElement("div");
+    modal.className = "xd-modal-wrap";
+    modal.innerHTML = `
+      <section class="xd-modal">
+        <div class="xd-modal-handle"></div>
+        <div style="display:flex;align-items:center;gap:13px;">
+          ${avatarHTML(char)}
+          <div>
+            <div class="xd-modal-title">${escapeHTML(realName(char))}</div>
+            <div style="font-size:10px;color:#a97983;margin-top:3px;">
+              ${escapeHTML(char.handle ? "@" + char.handle : "GUEST")}
+            </div>
+          </div>
+        </div>
+
+        <div class="xd-field">
+          <label>简介</label>
+          <div style="font-size:12px;line-height:1.7;color:#75696b;">
+            ${escapeHTML(char.bio || "这个人没有留下简介。")}
+          </div>
+        </div>
+
+        <div class="xd-field">
+          <label>节目人设预览</label>
+          <div style="font-size:12px;line-height:1.8;color:#75696b;background:white;border-radius:15px;padding:12px;">
+            ${escapeHTML(persona).slice(0, 500)}
+          </div>
+        </div>
+
+        <div class="xd-modal-actions">
+          <button class="xd-small-btn" data-modal-close>关闭</button>
+          <button class="xd-primary" style="margin-top:0;" data-private-preview>💬 私信</button>
+        </div>
+      </section>
+    `;
+
+    state.container.querySelector(".roche-plugin-xindong-xianchang").appendChild(modal);
+
+    const close = modal.querySelector("[data-modal-close]");
+    close.addEventListener("click", closeModal);
+
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) closeModal();
+    });
+
+    modal.querySelector("[data-private-preview]").addEventListener("click", () => {
+      closeModal();
+      toast("私信页面将在下一版接入");
+    });
+  }
+
+  function openCreateArchive() {
+    const modal = document.createElement("div");
+    modal.className = "xd-modal-wrap";
+    modal.innerHTML = `
+      <section class="xd-modal">
+        <div class="xd-modal-handle"></div>
+        <div class="xd-kicker">NEW SEASON</div>
+        <div class="xd-modal-title" style="margin-top:4px;">创建新的恋综</div>
+
+        <div class="xd-field">
+          <label>恋综名称</label>
+          <input data-archive-title placeholder="例如：心动小屋" maxlength="30">
+        </div>
+
+        <div class="xd-field">
+          <label>本季氛围</label>
+          <input data-archive-tone value="温柔、暧昧、轻微修罗场" maxlength="60">
+        </div>
+
+        <div class="xd-field">
+          <label>嘉宾</label>
+          <div style="font-size:11px;line-height:1.7;color:#8e8183;">
+            第一版会自动读取你当前 Roche 角色列表，并从中随机带入最多 4 位作为预览阵容。
+          </div>
+        </div>
+
+        <div class="xd-modal-actions">
+          <button class="xd-small-btn" data-modal-close>取消</button>
+          <button class="xd-primary" style="margin-top:0;" data-create>创建档案</button>
+        </div>
+      </section>
+    `;
+
+    state.container.querySelector(".roche-plugin-xindong-xianchang").appendChild(modal);
+
+    modal.querySelector("[data-modal-close]").addEventListener("click", closeModal);
+
+    modal.querySelector("[data-create]").addEventListener("click", async () => {
+      const title = modal.querySelector("[data-archive-title]").value.trim() || "心动小屋";
+      const tone = modal.querySelector("[data-archive-tone]").value.trim() || "温柔、暧昧、轻微修罗场";
+
+      const picked = state.characters.slice(0, 4).map((c) => ({
+        characterId: c.id,
+        name: c.name || "",
+        handle: c.handle || "",
+        avatar: c.avatar || "",
+        bio: c.bio || "",
+        personaSnapshot: c.persona || c.bio || "",
+        joinedDay: 1,
+        isNewGuest: false
+      }));
+
+      const archive = {
+        archiveId: uid(),
+        title,
+        createdAt: Date.now(),
+        lastSavedAt: Date.now(),
+        userPersona: {
+          personaId: state.user?.id || uid(),
+          name: state.user?.name || "",
+          handle: state.user?.handle || "",
+          avatar: state.user?.avatar || "",
+          personaSnapshot: state.user?.persona || state.user?.bio || ""
+        },
+        characters: picked,
+        worldbook: {
+          selectedCategoryIds: [],
+          selectedEntryIds: [],
+          snapshotText: ""
+        },
+        seasonConfig: {
+          description: "一档以自然互动与真实心动为核心的恋爱真人秀。",
+          tone,
+          forbiddenContent: ""
+        },
+        currentDay: 1,
+        currentTime: "20:36",
+        currentSceneLabel: "心动小屋 · 客厅",
+        timeline: [{
+          day: 1,
+          summary: "",
+          fullNarrative: ""
+        }],
+        stageSummaries: [],
+        relationships: {
+          userToChar: {},
+          charToChar: {}
+        },
+        privateMessages: {},
+        events: [],
+        pendingRequest: false,
+        lastNarrative: "",
+        lastQuote: ""
+      };
+
+      state.archives.unshift({
+        archiveId: archive.archiveId,
+        title: archive.title,
+        currentDay: 1,
+        characterNames: picked.map(c => c.name),
+        characterAvatars: picked.map(c => c.avatar),
+        lastSummary: "新的恋综世界刚刚开机。",
+        lastSavedAt: archive.lastSavedAt
+      });
+
+      state.currentArchive = archive;
+      await safeSet(`archive:${archive.archiveId}`, archive);
+      await safeSet("archiveIndex", state.archives);
+
+      closeModal();
+      state.activeTab = "show";
+      toast("《" + title + "》已开机");
+      renderPage();
+      updateTopDay();
+    });
+  }
+
+  async function saveCurrentArchive() {
+    if (!state.currentArchive) return;
+
+    state.currentArchive.lastSavedAt = Date.now();
+
+    const indexEntry = {
+      archiveId: state.currentArchive.archiveId,
+      title: state.currentArchive.title,
+      currentDay: state.currentArchive.currentDay,
+      characterNames: state.currentArchive.characters.map(c => c.name),
+      characterAvatars: state.currentArchive.characters.map(c => c.avatar),
+      lastSummary:
+        state.currentArchive.lastSummary ||
+        state.currentArchive.lastNarrative?.slice(0, 80) ||
+        "暂无剧情",
+      lastSavedAt: state.currentArchive.lastSavedAt
+    };
+
+    const existing = state.archives.findIndex(a => a.archiveId === indexEntry.archiveId);
+    if (existing >= 0) state.archives[existing] = indexEntry;
+    else state.archives.unshift(indexEntry);
+
+    await safeSet(`archive:${state.currentArchive.archiveId}`, state.currentArchive);
+    await safeSet("archiveIndex", state.archives);
+  }
+
+  async function loadRocheData(roche) {
     try {
-      var data = await advanceStory(state.archive, roche, actionText);
-      state.lastResult = data;
-    } catch (e) {
-      // 错误已在 advanceStory 内部通过 toast 提示
+      state.user = await roche.persona.getActiveUserPersona();
+    } catch (error) {
+      console.warn("[心动现场] 无法读取当前 USER", error);
+      state.user = null;
     }
-    await rerender();
+
+    try {
+      state.characters = (await roche.character.list()) || [];
+    } catch (error) {
+      console.warn("[心动现场] 无法读取 CHAR", error);
+      state.characters = [];
+    }
+
+    state.archives = await safeGet("archiveIndex", []);
+
+    if (state.archives.length) {
+      const first = state.archives[0];
+      state.currentArchive = await safeGet(`archive:${first.archiveId}`, first);
+    }
   }
 
-  // ---------- 插件注册 ----------
+  async function mount(container, roche) {
+    state.container = container;
+    state.roche = roche;
+    state.activeTab = "show";
+    state.listeners = [];
+
+    injectStyle();
+    renderShell();
+    await loadRocheData(roche);
+    renderPage();
+    updateTopDay();
+  }
+
+  async function unmount(container) {
+    state.listeners.forEach((cleanup) => {
+      try { cleanup(); } catch {}
+    });
+    state.listeners = [];
+
+    const modal = container.querySelector(".xd-modal-wrap");
+    if (modal) modal.remove();
+
+    container.replaceChildren();
+
+    const style = document.getElementById(STYLE_ID);
+    if (style) style.remove();
+
+    state.container = null;
+    state.roche = null;
+    state.currentArchive = null;
+  }
 
   window.RochePlugin.register({
     id: PLUGIN_ID,
@@ -1082,41 +1498,15 @@
       {
         id: APP_ID,
         name: "心动现场",
-        icon: "favorite",
+        icon: "heart",
         iconImage: "",
         async mount(container, roche) {
-          injectStyle();
-          container.innerHTML = '<div class="roche-plugin-xindong"><div class="xdxc-screen">加载中...</div></div>';
-
-          var state = {
-            archive: null,
-            screen: null,
-            wizard: null,
-            currentGuestId: null,
-            relationshipSubTab: "user",
-            lastResult: null,
-            pmSending: false,
-            settings: (await roche.storage.get("settings")) || { danmuEnabled: true }
-          };
-
-          var root = container.querySelector(".roche-plugin-xindong");
-
-          async function rerender() {
-            await render(root, roche, state);
-          }
-
-          bindEvents(root, roche, state, rerender);
-          container._xdxcState = state;
-          container._xdxcRerender = rerender;
-
-          await rerender();
+          await mount(container, roche);
         },
-        async unmount(container) {
-          removeStyle();
-          container.replaceChildren();
+        async unmount(container, roche) {
+          await unmount(container);
         }
       }
     ]
   });
 })();
-
