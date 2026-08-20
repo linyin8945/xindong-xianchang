@@ -2,16 +2,13 @@
   "id": "xindong-xianchang",
   "name": "心动现场",
   "version": "1.0.0",
-  "description": "修罗场恋综模拟器，读取你在 Roche 中已有的人设和角色，展开一场自定义的恋综故事",
+  "description": "低饱和高级恋综风恋爱模拟器：节目、嘉宾、关系与档案。",
   "author": "linyin8945",
   "entry": "https://raw.githubusercontent.com/linyin8945/xindong-xianchang/main/plugin.js",
   "hash": "",
   "permissions": [
     "persona:read",
     "character:read",
-    "memory:read",
-    "worldbook:read",
-    "ai:chat",
     "storage",
     "ui"
   ]
