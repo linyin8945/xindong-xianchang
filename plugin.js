@@ -1,25 +1,23 @@
-下面代码直接替换你现在的 `plugin.js`。
-
-```javascript
-/* =========================================================
-   《心动现场》· 恋综模拟器
-   V1.4.0 · House / Daily Events / Watch Room / My Phone
-   作者：linyin8945
-
-   本版核心：
-   01. 心动小屋 → 地图式平面 UI
-   02. 今日玩法 → 独立事件系统，与小屋地点联动
-   03. 观察室 → 节目页入口，查看玩家不在时的屋内动态
-   04. 我的手机 → 动态 / 微博 / 私信 / 备忘录
-   05. 动态与微博严格分离
-   06. 世界书 → 独立世界书库 + 创建档案时勾选
-   07. USER → 支持多个 USER 人设选择
-   08. 沉浸式 / 非沉浸式模式
-   09. 嘉宾页面 UI 保持原版，不重新设计
-   10. 启动插件时不再把 Roche 全部 CHAR 直接塞进本季嘉宾
-   11. 只有创建档案并选择嘉宾后，本季嘉宾才正式出现
-   12. 设置图标改为透明浅色爱心
-   ========================================================= */
+/* 《心动现场》 v1.3.0
+ * 作者：linyin8945
+ *
+ * 本版：
+ * - 全屏铺满
+ * - 顶栏返回键保留
+ * - 右上角恋综设置
+ * - 沉浸模式 / 记忆融合模式
+ * - 创建档案后才确定本季嘉宾
+ * - 嘉宾候选池读取 Roche 角色
+ * - 嘉宾详情 + 关系
+ * - 私信独立页面
+ * - 观察室（仅从节目页进入）
+ * - 手机中心（微博 / 匿名短信 / 备忘录 / 相册）
+ * - 世界书库：Roche 世界书 + 插件自建世界书
+ * - 创建恋综时可勾选多个世界书
+ * - 心动小屋地图
+ * - 玩法入口
+ * - 档案彼此独立
+ */
 
 (() => {
   "use strict";
@@ -27,37 +25,38 @@
   const PLUGIN_ID = "xindong-xianchang";
   const APP_ID = "xindong-xianchang-home";
   const STYLE_ID = "xindong-xianchang-style";
-  const VERSION = "1.4.0";
 
   const state = {
     roche: null,
     container: null,
 
     activeTab: "show",
+    page: "tab",
+    stack: [],
 
     user: null,
-    userPersonas: [],
 
-    // 注意：
-    // characters 不再作为“当前嘉宾列表”使用。
-    // 当前嘉宾永远从 currentArchive.characters 读取。
-    characterPool: [],
+    // Roche 中所有角色：只作为“创建恋综时”的候选池
+    candidateCharacters: [],
 
-    worldbooks: [],
+    // 当前档案真正选中的嘉宾
+    characters: [],
+
     archives: [],
     currentArchive: null,
 
-    currentHouseView: "overview",
-    currentPhoneView: "home",
+    // 世界书：Roche 只作为来源读取；插件自建世界书独立保存
+    rocheWorldbooks: [],
+    customWorldbooks: [],
 
-    listeners: [],
+    listeners: []
   };
 
   /* =========================================================
      基础工具
      ========================================================= */
 
-  const escapeHTML = (value) =>
+  const esc = (value) =>
     String(value ?? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
@@ -70,18 +69,16 @@
       ? crypto.randomUUID()
       : `xd-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  const displayName = (item, fallback = "未命名") =>
-    item?.handle || item?.name || fallback;
-
-  const realName = (item, fallback = "未命名") =>
+  const nameOf = (item, fallback = "未命名") =>
     item?.name || item?.handle || fallback;
 
-  const avatar = (item) => item?.avatar || "";
+  const handleOf = (item) =>
+    item?.handle ? `@${item.handle}` : "";
 
-  const currentCharacters = () =>
-    state.currentArchive?.characters || [];
+  const avatarOf = (item) =>
+    item?.avatar || "";
 
-  async function safeGet(key, fallback) {
+  async function storageGet(key, fallback = null) {
     try {
       const value = await state.roche.storage.get(key);
       return value ?? fallback;
@@ -90,15 +87,15 @@
     }
   }
 
-  async function safeSet(key, value) {
+  async function storageSet(key, value) {
     try {
       await state.roche.storage.set(key, value);
     } catch (error) {
-      console.error("[心动现场] storage.set failed", error);
+      console.error("[心动现场] storage.set", error);
     }
   }
 
-  async function safeDelete(key) {
+  async function storageDelete(key) {
     try {
       await state.roche.storage.delete(key);
     } catch {}
@@ -112,107 +109,30 @@
     }
   }
 
-  async function confirmDialog(title, message) {
-    try {
-      return await state.roche.ui.confirm({
-        title,
-        message,
-      });
-    } catch {
-      return window.confirm(message);
-    }
-  }
-
-  function selectedCharacter(id) {
-    return currentCharacters().find((c) => c.characterId === id || c.id === id);
-  }
-
-  /* =========================================================
-     Roche 数据读取
-     ========================================================= */
-
-  async function loadUserPersonas(roche) {
-    /*
-      不同 Roche 版本可能提供不同的人设 API。
-      优先尝试 list，再退回 active user。
-    */
-
-    let personas = [];
-
-    try {
-      if (roche.persona?.listUserPersonas) {
-        personas = await roche.persona.listUserPersonas();
-      } else if (roche.persona?.list) {
-        personas = await roche.persona.list();
-      } else if (roche.persona?.getUserPersonas) {
-        personas = await roche.persona.getUserPersonas();
-      }
-    } catch (error) {
-      console.warn("[心动现场] USER 人设列表读取失败", error);
-    }
-
-    if (!Array.isArray(personas) || !personas.length) {
+  function clearListeners() {
+    state.listeners.forEach((fn) => {
       try {
-        const active = await roche.persona.getActiveUserPersona();
-        if (active) personas = [active];
+        fn();
       } catch {}
-    }
+    });
 
-    state.userPersonas = personas || [];
-    state.user = state.userPersonas[0] || null;
+    state.listeners = [];
   }
 
-  async function loadCharacterPool() {
-    /*
-      这里依然读取 Roche CHAR。
-      但它只是“候选池”。
+  function listen(element, event, handler) {
+    if (!element) return;
 
-      不会：
-      - 自动加入本季
-      - 自动显示到嘉宾页面
-      - 自动生成关系线
+    element.addEventListener(event, handler);
 
-      只有创建档案时用户勾选后才正式进入 archive。
-    */
-
-    try {
-      state.characterPool =
-        (await state.roche.character.list()) || [];
-    } catch (error) {
-      console.warn("[心动现场] CHAR 候选池读取失败", error);
-      state.characterPool = [];
-    }
-  }
-
-  async function loadWorldbooks() {
-    /*
-      世界书也只作为候选库。
-      未勾选的世界书不会进入 currentArchive.worldbook。
-
-      兼容几种可能的 Roche Worldbook API 命名。
-    */
-
-    let books = [];
-
-    try {
-      if (state.roche.worldbook?.list) {
-        books = await state.roche.worldbook.list();
-      } else if (state.roche.worldBook?.list) {
-        books = await state.roche.worldBook.list();
-      } else if (state.roche.worldbook?.getAll) {
-        books = await state.roche.worldbook.getAll();
-      } else if (state.roche.worldBook?.getAll) {
-        books = await state.roche.worldBook.getAll();
-      }
-    } catch (error) {
-      console.warn("[心动现场] 世界书读取失败", error);
-    }
-
-    state.worldbooks = Array.isArray(books) ? books : [];
+    state.listeners.push(() => {
+      try {
+        element.removeEventListener(event, handler);
+      } catch {}
+    });
   }
 
   /* =========================================================
-     CSS
+     样式
      ========================================================= */
 
   function injectStyle() {
@@ -228,26 +148,25 @@
       }
 
       .roche-plugin-xindong-xianchang {
-        --xd-bg: #f6f1f1;
-        --xd-paper: rgba(255,255,255,.82);
-        --xd-paper-strong: #fffafa;
-        --xd-pink: #b88791;
-        --xd-pink-dark: #855d67;
-        --xd-pink-soft: #ead9dc;
-        --xd-pink-faint: #f1e5e6;
-        --xd-text: #41383a;
-        --xd-muted: #8e8183;
-        --xd-line: rgba(117,91,97,.13);
-        --xd-shadow: 0 14px 40px rgba(102,73,80,.08);
+        --xd-bg:#f6f1f1;
+        --xd-paper:rgba(255,255,255,.82);
+        --xd-paper-strong:#fffafa;
+        --xd-pink:#b88791;
+        --xd-pink-dark:#855d67;
+        --xd-pink-soft:#ead9dc;
+        --xd-pink-faint:#f1e5e6;
+        --xd-text:#41383a;
+        --xd-muted:#8e8183;
+        --xd-line:rgba(117,91,97,.13);
+        --xd-shadow:0 14px 40px rgba(102,73,80,.08);
 
-        width: 100%;
-        height: 100%;
-        min-height: 100%;
-        position: relative;
-        overflow: hidden;
+        position:relative;
+        width:100%;
+        height:100%;
+        min-height:100%;
+        max-height:none;
 
-        display: flex;
-        flex-direction: column;
+        overflow:hidden;
 
         background:
           radial-gradient(
@@ -267,7 +186,7 @@
             #f7f1f1 100%
           );
 
-        color: var(--xd-text);
+        color:var(--xd-text);
 
         font-family:
           -apple-system,
@@ -278,13 +197,20 @@
           Arial,
           sans-serif;
 
-        -webkit-font-smoothing: antialiased;
+        -webkit-font-smoothing:antialiased;
+
+        display:flex;
+        flex-direction:column;
+
+        /* 关键：不再给插件自己留下上下额外空白 */
+        margin:0 !important;
+        padding:0 !important;
       }
 
       .roche-plugin-xindong-xianchang button,
       .roche-plugin-xindong-xianchang input,
       .roche-plugin-xindong-xianchang textarea {
-        font: inherit;
+        font:inherit;
       }
 
       /* =====================================================
@@ -292,118 +218,126 @@
          ===================================================== */
 
       .xd-topbar {
-        flex: 0 0 auto;
-        height: 72px;
-        padding: 12px 14px 8px;
+        flex:0 0 72px;
+        height:72px;
 
-        display: flex;
-        align-items: flex-end;
-        gap: 10px;
+        padding:12px 14px 8px;
 
-        background: rgba(249,246,245,.78);
-        border-bottom: 1px solid var(--xd-line);
+        display:flex;
+        align-items:flex-end;
+        gap:10px;
 
-        backdrop-filter: blur(22px) saturate(125%);
-        -webkit-backdrop-filter: blur(22px) saturate(125%);
+        background:rgba(249,246,245,.78);
 
-        position: relative;
-        z-index: 20;
+        border-bottom:1px solid var(--xd-line);
+
+        backdrop-filter:blur(22px) saturate(125%);
+        -webkit-backdrop-filter:blur(22px) saturate(125%);
+
+        position:relative;
+        z-index:20;
       }
 
       .xd-back,
       .xd-settings {
-        width: 40px;
-        height: 40px;
-        flex: 0 0 40px;
+        width:40px;
+        height:40px;
+        flex:0 0 40px;
 
-        border: 0;
-        border-radius: 14px;
+        border:0;
+        border-radius:14px;
 
-        background: rgba(255,255,255,.64);
+        background:rgba(255,255,255,.64);
 
-        display: grid;
-        place-items: center;
+        color:var(--xd-pink-dark);
 
-        cursor: pointer;
+        display:grid;
+        place-items:center;
+
+        cursor:pointer;
 
         box-shadow:
           0 4px 18px rgba(101,73,80,.06);
+
+        transition:.16s ease;
       }
 
       .xd-back {
-        color: var(--xd-pink-dark);
-        font-size: 25px;
-        line-height: 1;
+        font-size:25px;
+        line-height:1;
       }
 
-      /* 不再使用丑齿轮 */
       .xd-settings {
-        color: #b88791;
-        font-size: 21px;
-      }
-
-      .xd-settings-heart {
-        opacity: .85;
-        transform: translateY(-1px);
+        font-size:17px;
       }
 
       .xd-back:active,
       .xd-settings:active {
-        transform: scale(.96);
+        transform:scale(.94);
       }
 
       .xd-heading {
-        min-width: 0;
-        flex: 1;
-        padding-bottom: 2px;
+        min-width:0;
+        flex:1;
+        padding-bottom:2px;
       }
 
       .xd-eyebrow {
-        font-size: 10px;
-        letter-spacing: .18em;
-        color: var(--xd-pink);
-        font-weight: 700;
-        margin-bottom: 2px;
+        font-size:10px;
+        letter-spacing:.18em;
+        color:var(--xd-pink);
+        font-weight:700;
+        margin-bottom:2px;
       }
 
       .xd-title {
-        font-size: 21px;
-        line-height: 1.15;
-        letter-spacing: -.03em;
-        font-weight: 760;
-        color: #403638;
+        font-size:21px;
+        line-height:1.15;
+        letter-spacing:-.03em;
+        font-weight:760;
+        color:#403638;
 
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        white-space:nowrap;
+        overflow:hidden;
+        text-overflow:ellipsis;
       }
 
       .xd-topday {
-        flex: 0 0 auto;
-        padding: 8px 11px;
-        border-radius: 13px;
+        flex:0 0 auto;
 
-        background: rgba(255,255,255,.65);
-        border: 1px solid rgba(145,110,118,.10);
+        padding:8px 11px;
 
-        text-align: right;
-        margin-bottom: 1px;
+        border-radius:13px;
+
+        background:rgba(255,255,255,.65);
+
+        border:1px solid rgba(145,110,118,.10);
+
+        text-align:right;
+
+        margin-bottom:1px;
       }
 
       .xd-topday-main {
-        display: block;
-        font-size: 11px;
-        font-weight: 750;
-        letter-spacing: .08em;
-        color: var(--xd-pink-dark);
+        display:block;
+
+        font-size:11px;
+        font-weight:750;
+        letter-spacing:.08em;
+
+        color:var(--xd-pink-dark);
       }
 
       .xd-topday-sub {
-        display: block;
-        margin-top: 2px;
-        font-size: 9px;
-        color: var(--xd-muted);
-        letter-spacing: .12em;
+        display:block;
+
+        margin-top:2px;
+
+        font-size:9px;
+
+        color:var(--xd-muted);
+
+        letter-spacing:.12em;
       }
 
       /* =====================================================
@@ -411,23 +345,31 @@
          ===================================================== */
 
       .xd-content {
-        flex: 1 1 auto;
-        min-height: 0;
-        overflow: hidden;
-        position: relative;
+        flex:1 1 auto;
+
+        min-height:0;
+
+        overflow:hidden;
+
+        position:relative;
       }
 
       .xd-page {
-        width: 100%;
-        height: 100%;
-        overflow-y: auto;
-        padding: 18px 16px 104px;
+        width:100%;
+        height:100%;
 
-        scrollbar-width: none;
+        overflow-y:auto;
+
+        padding:
+          18px
+          16px
+          105px;
+
+        scrollbar-width:none;
       }
 
       .xd-page::-webkit-scrollbar {
-        display: none;
+        display:none;
       }
 
       /* =====================================================
@@ -435,167 +377,160 @@
          ===================================================== */
 
       .xd-bottom {
-        flex: 0 0 auto;
-        height: 82px;
-        padding: 8px 10px 15px;
+        flex:0 0 82px;
 
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 5px;
+        height:82px;
 
-        background: rgba(250,247,246,.88);
-        border-top: 1px solid var(--xd-line);
+        padding:8px 10px 15px;
 
-        backdrop-filter: blur(22px) saturate(125%);
-        -webkit-backdrop-filter: blur(22px) saturate(125%);
+        display:grid;
 
-        position: relative;
-        z-index: 20;
+        grid-template-columns:
+          repeat(4,1fr);
+
+        gap:5px;
+
+        background:rgba(250,247,246,.88);
+
+        border-top:1px solid var(--xd-line);
+
+        backdrop-filter:
+          blur(22px)
+          saturate(125%);
+
+        -webkit-backdrop-filter:
+          blur(22px)
+          saturate(125%);
+
+        position:relative;
+
+        z-index:20;
       }
 
       .xd-tab {
-        border: 0;
-        background: transparent;
+        border:0;
+        background:transparent;
 
-        color: #a09597;
-        border-radius: 16px;
+        color:#a09597;
 
-        cursor: pointer;
+        border-radius:16px;
 
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
+        cursor:pointer;
 
-        transition: .18s ease;
+        display:flex;
+
+        flex-direction:column;
+
+        align-items:center;
+
+        justify-content:center;
+
+        gap:4px;
+
+        transition:.18s ease;
       }
 
       .xd-tab-icon {
-        width: 29px;
-        height: 29px;
-        border-radius: 11px;
+        width:29px;
+        height:29px;
 
-        display: grid;
-        place-items: center;
+        border-radius:11px;
 
-        font-size: 16px;
-        transition: .18s ease;
+        display:grid;
+        place-items:center;
+
+        font-size:16px;
+
+        transition:.18s ease;
       }
 
       .xd-tab-label {
-        font-size: 10px;
-        font-weight: 650;
-        letter-spacing: .03em;
+        font-size:10px;
+
+        font-weight:650;
+
+        letter-spacing:.03em;
       }
 
       .xd-tab.active {
-        color: var(--xd-pink-dark);
+        color:var(--xd-pink-dark);
       }
 
       .xd-tab.active .xd-tab-icon {
-        background: var(--xd-pink-faint);
-        box-shadow:
-          inset 0 0 0 1px rgba(184,135,145,.10);
+        background:var(--xd-pink-faint);
 
-        transform: translateY(-1px);
+        box-shadow:
+          inset 0 0 0 1px
+          rgba(184,135,145,.10);
+
+        transform:translateY(-1px);
       }
 
       /* =====================================================
-         通用
+         公共
          ===================================================== */
 
       .xd-kicker {
-        color: var(--xd-pink);
-        font-size: 10px;
-        letter-spacing: .18em;
-        font-weight: 750;
-        text-transform: uppercase;
+        color:var(--xd-pink);
+
+        font-size:10px;
+
+        letter-spacing:.18em;
+
+        font-weight:750;
+
+        text-transform:uppercase;
       }
 
       .xd-section-head {
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        gap: 12px;
+        display:flex;
 
-        margin: 22px 2px 10px;
+        align-items:flex-end;
+
+        justify-content:space-between;
+
+        gap:12px;
+
+        margin:
+          22px 2px 10px;
       }
 
       .xd-section-title {
-        font-size: 17px;
-        font-weight: 780;
-        letter-spacing: -.025em;
+        font-size:17px;
+
+        font-weight:780;
+
+        letter-spacing:-.025em;
       }
 
       .xd-section-note {
-        font-size: 10px;
-        color: var(--xd-muted);
+        font-size:10px;
+
+        color:var(--xd-muted);
       }
 
-      .xd-empty {
-        text-align: center;
-        padding: 38px 20px;
-
-        border-radius: 23px;
-        border: 1px dashed rgba(140,104,112,.18);
-
-        background: rgba(255,255,255,.42);
-      }
-
-      .xd-empty-icon {
-        font-size: 27px;
-        margin-bottom: 9px;
-        opacity: .8;
-      }
-
-      .xd-empty-title {
-        font-size: 15px;
-        font-weight: 780;
-      }
-
-      .xd-empty-text {
-        margin-top: 6px;
-        font-size: 11px;
-        line-height: 1.7;
-        color: var(--xd-muted);
-      }
-
-      .xd-primary {
-        border: 0;
-        border-radius: 15px;
-        padding: 11px 16px;
-
-        background: #a97983;
-        color: white;
-
-        font-size: 12px;
-        font-weight: 750;
-
-        cursor: pointer;
-
-        box-shadow:
-          0 7px 18px rgba(132,91,101,.18);
-      }
-
-      .xd-primary:active {
-        transform: scale(.98);
+      .xd-card-grid {
+        display:grid;
+        gap:11px;
       }
 
       /* =====================================================
-         主页面 Hero
+         Hero
          ===================================================== */
 
       .xd-hero {
-        margin-top: 7px;
+        margin-top:7px;
 
-        padding: 22px 20px 20px;
+        padding:
+          22px 20px 20px;
 
-        border-radius: 27px;
-        min-height: 230px;
+        border-radius:27px;
 
-        position: relative;
-        overflow: hidden;
+        min-height:230px;
+
+        position:relative;
+
+        overflow:hidden;
 
         background:
           linear-gradient(
@@ -604,720 +539,338 @@
             rgba(245,229,231,.80)
           );
 
-        border: 1px solid rgba(157,116,124,.13);
-        box-shadow: var(--xd-shadow);
+        border:
+          1px solid
+          rgba(157,116,124,.13);
+
+        box-shadow:var(--xd-shadow);
       }
 
       .xd-hero::before {
-        content: "";
+        content:"";
 
-        position: absolute;
+        position:absolute;
 
-        width: 190px;
-        height: 190px;
+        width:190px;
+        height:190px;
 
-        border-radius: 50%;
+        border-radius:50%;
 
-        right: -55px;
-        top: -80px;
+        right:-55px;
+        top:-80px;
 
-        background: rgba(184,135,145,.16);
+        background:
+          rgba(184,135,145,.16);
       }
 
       .xd-hero::after {
-        content: "";
+        content:"";
 
-        position: absolute;
+        position:absolute;
 
-        width: 120px;
-        height: 120px;
+        width:120px;
+        height:120px;
 
-        border-radius: 50%;
+        border-radius:50%;
 
-        right: 35px;
-        bottom: -75px;
+        right:35px;
+        bottom:-75px;
 
-        border: 1px solid rgba(184,135,145,.20);
+        border:
+          1px solid
+          rgba(184,135,145,.20);
       }
 
       .xd-hero > * {
-        position: relative;
-        z-index: 1;
+        position:relative;
+        z-index:1;
       }
 
       .xd-hero-title {
-        margin: 8px 0 7px;
+        margin:
+          8px 0 7px;
 
-        font-size: 32px;
-        line-height: 1.05;
+        font-size:32px;
 
-        letter-spacing: -.055em;
-        font-weight: 800;
+        line-height:1.05;
+
+        letter-spacing:-.055em;
+
+        font-weight:800;
       }
 
       .xd-hero-sub {
-        max-width: 300px;
+        max-width:310px;
 
-        color: #75696b;
+        color:#75696b;
 
-        font-size: 13px;
-        line-height: 1.7;
+        font-size:13px;
+
+        line-height:1.7;
       }
 
       .xd-live {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
+        display:inline-flex;
 
-        margin-top: 19px;
+        align-items:center;
 
-        padding: 7px 10px;
+        gap:6px;
 
-        border-radius: 999px;
+        margin-top:19px;
 
-        background: rgba(255,255,255,.70);
+        padding:7px 10px;
 
-        color: var(--xd-pink-dark);
+        border-radius:999px;
 
-        font-size: 10px;
-        font-weight: 750;
-        letter-spacing: .08em;
+        background:
+          rgba(255,255,255,.70);
+
+        color:var(--xd-pink-dark);
+
+        font-size:10px;
+
+        font-weight:750;
+
+        letter-spacing:.08em;
       }
 
       .xd-live-dot {
-        width: 6px;
-        height: 6px;
+        width:6px;
+        height:6px;
 
-        border-radius: 50%;
+        border-radius:50%;
 
-        background: #b88791;
+        background:#b88791;
 
         box-shadow:
-          0 0 0 4px rgba(184,135,145,.12);
+          0 0 0 4px
+          rgba(184,135,145,.12);
       }
 
       /* =====================================================
-         今日玩法
+         节目现场
          ===================================================== */
 
-      .xd-event-card {
-        position: relative;
+      .xd-scene {
+        border-radius:23px;
 
-        padding: 16px;
+        background:
+          rgba(255,255,255,.72);
 
-        border-radius: 21px;
+        border:
+          1px solid
+          var(--xd-line);
+
+        padding:17px;
+
+        box-shadow:
+          0 8px 25px
+          rgba(96,70,76,.045);
+      }
+
+      .xd-scene-label {
+        font-size:10px;
+
+        color:var(--xd-pink);
+
+        letter-spacing:.12em;
+
+        font-weight:750;
+      }
+
+      .xd-narrative {
+        margin-top:10px;
+
+        font-size:14px;
+
+        line-height:1.85;
+
+        color:#4b4143;
+      }
+
+      .xd-quote {
+        margin-top:13px;
+
+        padding:12px 13px;
+
+        border-left:
+          2px solid
+          var(--xd-pink);
+
+        background:
+          rgba(245,231,233,.48);
+
+        border-radius:
+          0 13px 13px 0;
+
+        font-size:13px;
+
+        line-height:1.65;
+
+        color:#65575a;
+      }
+
+      /* =====================================================
+         玩法入口
+         ===================================================== */
+
+      .xd-play-grid {
+        display:grid;
+
+        grid-template-columns:
+          repeat(2,minmax(0,1fr));
+
+        gap:10px;
+      }
+
+      .xd-play-card {
+        position:relative;
+
+        min-height:116px;
+
+        padding:15px;
+
+        border:1px solid
+          rgba(143,105,113,.12);
+
+        border-radius:21px;
 
         background:
           linear-gradient(
-            140deg,
+            145deg,
             rgba(255,255,255,.86),
-            rgba(247,233,235,.74)
+            rgba(247,233,235,.68)
           );
 
-        border: 1px solid rgba(151,112,120,.13);
+        cursor:pointer;
+
+        text-align:left;
 
         box-shadow:
-          0 8px 24px rgba(96,70,76,.055);
+          0 7px 22px
+          rgba(101,73,80,.045);
 
-        cursor: pointer;
+        transition:.16s ease;
 
-        transition: .18s ease;
+        overflow:hidden;
       }
 
-      .xd-event-card + .xd-event-card {
-        margin-top: 9px;
-      }
+      .xd-play-card::after {
+        content:"";
 
-      .xd-event-card:active {
-        transform: scale(.985);
-      }
+        position:absolute;
 
-      .xd-event-top {
-        display: flex;
-        align-items: center;
-        gap: 11px;
-      }
+        width:75px;
+        height:75px;
 
-      .xd-event-icon {
-        width: 45px;
-        height: 45px;
+        border-radius:50%;
 
-        flex: 0 0 45px;
-
-        border-radius: 15px;
-
-        display: grid;
-        place-items: center;
-
-        background: rgba(255,255,255,.76);
-
-        font-size: 21px;
-      }
-
-      .xd-event-main {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .xd-event-title {
-        font-size: 14px;
-        font-weight: 800;
-      }
-
-      .xd-event-meta {
-        margin-top: 4px;
-
-        font-size: 9px;
-        color: var(--xd-pink);
-
-        letter-spacing: .08em;
-      }
-
-      .xd-event-desc {
-        margin-top: 11px;
-
-        color: #75696b;
-
-        font-size: 11px;
-        line-height: 1.7;
-      }
-
-      .xd-event-arrow {
-        color: #b6a7aa;
-        font-size: 18px;
-      }
-
-      /* =====================================================
-         小屋地图
-         ===================================================== */
-
-      .xd-house {
-        position: relative;
-
-        margin-top: 7px;
-
-        min-height: 390px;
-
-        border-radius: 29px;
-
-        overflow: hidden;
+        right:-26px;
+        bottom:-30px;
 
         background:
-          linear-gradient(
-            145deg,
-            #f8eeef 0%,
-            #f4e2e5 45%,
-            #ead5d9 100%
-          );
-
-        border: 1px solid rgba(147,105,114,.14);
-
-        box-shadow:
-          0 16px 42px rgba(102,73,80,.10);
+          rgba(184,135,145,.10);
       }
 
-      .xd-house-wall {
-        position: absolute;
-        inset: 17px;
+      .xd-play-card:active {
+        transform:scale(.97);
+      }
 
-        border-radius: 23px;
+      .xd-play-icon {
+        width:38px;
+        height:38px;
+
+        display:grid;
+
+        place-items:center;
+
+        border-radius:14px;
 
         background:
-          linear-gradient(
-            135deg,
-            rgba(255,255,255,.72),
-            rgba(250,242,241,.66)
-          );
+          var(--xd-pink-faint);
 
-        border: 1px solid rgba(147,105,114,.11);
+        font-size:20px;
+
+        margin-bottom:9px;
       }
 
-      .xd-house-title {
-        position: absolute;
+      .xd-play-title {
+        font-size:13px;
 
-        top: 28px;
-        left: 28px;
-
-        z-index: 4;
+        font-weight:800;
       }
 
-      .xd-house-name {
-        margin-top: 4px;
+      .xd-play-desc {
+        margin-top:4px;
 
-        font-size: 21px;
-        font-weight: 800;
+        font-size:9px;
 
-        letter-spacing: -.04em;
-      }
+        line-height:1.5;
 
-      .xd-room {
-        position: absolute;
-
-        border: 1px solid rgba(137,100,109,.13);
-
-        background: rgba(255,255,255,.72);
-
-        border-radius: 19px;
-
-        box-shadow:
-          0 7px 18px rgba(100,73,79,.055);
-
-        cursor: pointer;
-
-        transition: .18s ease;
-
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-
-        text-align: center;
-      }
-
-      .xd-room:active {
-        transform: scale(.96);
-      }
-
-      .xd-room-icon {
-        font-size: 22px;
-      }
-
-      .xd-room-name {
-        margin-top: 5px;
-
-        font-size: 12px;
-        font-weight: 780;
-
-        color: #514548;
-      }
-
-      .xd-room-sub {
-        margin-top: 3px;
-
-        font-size: 8px;
-        color: #a28e92;
-      }
-
-      .xd-room.living {
-        left: 32px;
-        right: 32px;
-        top: 92px;
-        height: 106px;
-      }
-
-      .xd-room.kitchen {
-        left: 32px;
-        width: calc(50% - 38px);
-        top: 212px;
-        height: 92px;
-      }
-
-      .xd-room.garden {
-        right: 32px;
-        width: calc(50% - 38px);
-        top: 212px;
-        height: 92px;
-      }
-
-      .xd-room.bedroom {
-        left: 32px;
-        width: calc(50% - 38px);
-        top: 318px;
-        height: 54px;
-      }
-
-      .xd-room.balcony {
-        right: 32px;
-        width: calc(50% - 38px);
-        top: 318px;
-        height: 54px;
-      }
-
-      .xd-house-status {
-        margin-top: 10px;
-
-        padding: 12px 14px;
-
-        border-radius: 17px;
-
-        background: rgba(255,255,255,.58);
-
-        border: 1px solid rgba(147,105,114,.10);
-
-        font-size: 11px;
-        line-height: 1.7;
-
-        color: #75696b;
+        color:var(--xd-muted);
       }
 
       /* =====================================================
-         房间详情
+         弹幕
          ===================================================== */
 
-      .xd-location-card {
-        padding: 18px;
+      .xd-danmu {
+        display:flex;
 
-        border-radius: 24px;
+        flex-wrap:wrap;
 
-        background: rgba(255,255,255,.78);
-
-        border: 1px solid var(--xd-line);
-
-        box-shadow:
-          0 8px 25px rgba(96,70,76,.045);
+        gap:7px;
       }
 
-      .xd-location-title {
-        font-size: 23px;
-        font-weight: 800;
-        letter-spacing: -.04em;
-      }
+      .xd-danmu span {
+        padding:7px 10px;
 
-      .xd-location-desc {
-        margin-top: 7px;
-
-        color: var(--xd-muted);
-
-        font-size: 11px;
-        line-height: 1.7;
-      }
-
-      .xd-presence {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
-
-        margin-top: 14px;
-      }
-
-      .xd-presence-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-
-        padding: 6px 9px;
-
-        border-radius: 999px;
-
-        background: var(--xd-pink-faint);
-
-        color: var(--xd-pink-dark);
-
-        font-size: 9px;
-        font-weight: 700;
-      }
-
-      /* =====================================================
-         观察室
-         ===================================================== */
-
-      .xd-observe-card {
-        padding: 17px;
-
-        border-radius: 23px;
+        border-radius:999px;
 
         background:
-          linear-gradient(
-            145deg,
-            rgba(255,255,255,.84),
-            rgba(245,230,233,.72)
-          );
+          rgba(255,255,255,.66);
 
-        border: 1px solid var(--xd-line);
+        border:
+          1px solid
+          rgba(140,104,112,.10);
 
-        box-shadow:
-          0 9px 28px rgba(96,70,76,.055);
-      }
+        color:#75686b;
 
-      .xd-observe-row {
-        display: flex;
-        gap: 11px;
-
-        padding: 12px 0;
-
-        border-bottom: 1px solid rgba(117,91,97,.08);
-      }
-
-      .xd-observe-row:last-child {
-        border-bottom: 0;
-      }
-
-      .xd-observe-avatar {
-        width: 38px;
-        height: 38px;
-
-        flex: 0 0 38px;
-
-        border-radius: 13px;
-
-        overflow: hidden;
-
-        background: #eadbde;
-
-        display: grid;
-        place-items: center;
-
-        color: var(--xd-pink-dark);
-
-        font-size: 13px;
-        font-weight: 800;
-      }
-
-      .xd-observe-avatar img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-      }
-
-      .xd-observe-text {
-        flex: 1;
-
-        font-size: 11px;
-        line-height: 1.7;
-
-        color: #66585b;
-      }
-
-      .xd-observe-time {
-        margin-top: 3px;
-
-        color: #a69498;
-
-        font-size: 8px;
+        font-size:10px;
       }
 
       /* =====================================================
-         手机
-         ===================================================== */
-
-      .xd-phone {
-        border-radius: 28px;
-
-        padding: 17px;
-
-        background:
-          linear-gradient(
-            145deg,
-            #f8eeef,
-            #eee0e2
-          );
-
-        border: 1px solid rgba(147,105,114,.13);
-
-        box-shadow:
-          0 14px 38px rgba(96,70,76,.08);
-      }
-
-      .xd-phone-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-      }
-
-      .xd-phone-title {
-        font-size: 23px;
-        font-weight: 820;
-        letter-spacing: -.04em;
-      }
-
-      .xd-phone-time {
-        font-size: 10px;
-        color: var(--xd-muted);
-      }
-
-      .xd-app-grid {
-        display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 13px 8px;
-
-        margin-top: 22px;
-      }
-
-      .xd-app {
-        border: 0;
-        background: transparent;
-
-        cursor: pointer;
-
-        text-align: center;
-      }
-
-      .xd-app-icon {
-        width: 53px;
-        height: 53px;
-
-        margin: 0 auto;
-
-        border-radius: 17px;
-
-        display: grid;
-        place-items: center;
-
-        background: rgba(255,255,255,.74);
-
-        border: 1px solid rgba(147,105,114,.10);
-
-        box-shadow:
-          0 6px 16px rgba(100,73,79,.045);
-
-        font-size: 22px;
-      }
-
-      .xd-app-name {
-        margin-top: 6px;
-
-        font-size: 9px;
-        color: #685b5e;
-        font-weight: 680;
-      }
-
-      .xd-feed {
-        display: grid;
-        gap: 10px;
-      }
-
-      .xd-feed-card {
-        padding: 15px;
-
-        border-radius: 20px;
-
-        background: rgba(255,255,255,.76);
-
-        border: 1px solid var(--xd-line);
-      }
-
-      .xd-feed-top {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-      }
-
-      .xd-feed-avatar {
-        width: 35px;
-        height: 35px;
-
-        border-radius: 12px;
-
-        overflow: hidden;
-
-        background: #eadbde;
-
-        display: grid;
-        place-items: center;
-
-        color: var(--xd-pink-dark);
-
-        font-size: 11px;
-        font-weight: 800;
-      }
-
-      .xd-feed-avatar img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-      }
-
-      .xd-feed-author {
-        font-size: 12px;
-        font-weight: 780;
-      }
-
-      .xd-feed-role {
-        margin-top: 2px;
-
-        color: var(--xd-pink);
-
-        font-size: 8px;
-      }
-
-      .xd-feed-body {
-        margin-top: 11px;
-
-        font-size: 11px;
-        line-height: 1.75;
-
-        color: #65575a;
-      }
-
-      .xd-feed-time {
-        margin-top: 9px;
-
-        font-size: 8px;
-        color: #a69498;
-      }
-
-      /* 微博分类 */
-
-      .xd-weibo-tabs {
-        display: flex;
-        gap: 7px;
-
-        overflow-x: auto;
-
-        padding-bottom: 3px;
-
-        scrollbar-width: none;
-      }
-
-      .xd-weibo-tabs::-webkit-scrollbar {
-        display: none;
-      }
-
-      .xd-weibo-tab {
-        flex: 0 0 auto;
-
-        border: 0;
-
-        padding: 7px 11px;
-
-        border-radius: 999px;
-
-        background: rgba(255,255,255,.64);
-
-        color: #958689;
-
-        font-size: 9px;
-
-        cursor: pointer;
-      }
-
-      .xd-weibo-tab.active {
-        background: var(--xd-pink-faint);
-        color: var(--xd-pink-dark);
-        font-weight: 750;
-      }
-
-      /* =====================================================
-         嘉宾页面
-         =====================================================
-         注意：
-         这里保持你原来的嘉宾页面结构。
-         本版不重新设计嘉宾 UI。
+         嘉宾
          ===================================================== */
 
       .xd-profile {
-        display: flex;
-        align-items: center;
-        gap: 14px;
+        display:flex;
 
-        padding: 17px;
+        align-items:center;
 
-        border-radius: 22px;
+        gap:14px;
 
-        background: rgba(255,255,255,.76);
+        padding:17px;
 
-        border: 1px solid var(--xd-line);
+        border-radius:22px;
+
+        background:
+          rgba(255,255,255,.76);
+
+        border:
+          1px solid
+          var(--xd-line);
       }
 
       .xd-avatar {
-        width: 54px;
-        height: 54px;
+        width:54px;
+        height:54px;
 
-        flex: 0 0 54px;
+        flex:0 0 54px;
 
-        border-radius: 17px;
+        border-radius:17px;
 
-        overflow: hidden;
+        overflow:hidden;
 
         background:
           linear-gradient(
@@ -1326,116 +879,818 @@
             #f4e8e9
           );
 
-        display: grid;
-        place-items: center;
+        display:grid;
 
-        color: var(--xd-pink-dark);
+        place-items:center;
 
-        font-size: 19px;
-        font-weight: 800;
+        color:var(--xd-pink-dark);
+
+        font-size:19px;
+
+        font-weight:800;
       }
 
       .xd-avatar img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
-        display: block;
+        width:100%;
+        height:100%;
+
+        object-fit:cover;
+
+        display:block;
       }
 
       .xd-profile .xd-avatar {
-        width: 62px;
-        height: 62px;
-        flex-basis: 62px;
-        border-radius: 19px;
+        width:62px;
+        height:62px;
+
+        flex-basis:62px;
+
+        border-radius:19px;
       }
 
       .xd-profile-name {
-        font-size: 17px;
-        font-weight: 800;
+        font-size:17px;
+
+        font-weight:800;
       }
 
       .xd-profile-handle {
-        margin-top: 3px;
-        color: var(--xd-pink);
-        font-size: 10px;
+        margin-top:3px;
+
+        color:var(--xd-pink);
+
+        font-size:10px;
       }
 
       .xd-profile-bio {
-        margin-top: 6px;
-        color: var(--xd-muted);
-        font-size: 11px;
-        line-height: 1.5;
-      }
+        margin-top:6px;
 
-      .xd-card-grid {
-        display: grid;
-        gap: 11px;
+        color:var(--xd-muted);
+
+        font-size:11px;
+
+        line-height:1.5;
       }
 
       .xd-guest-card {
-        display: flex;
-        align-items: center;
-        gap: 13px;
+        display:flex;
 
-        padding: 13px;
+        align-items:center;
 
-        border-radius: 20px;
+        gap:13px;
 
-        background: rgba(255,255,255,.76);
+        padding:13px;
 
-        border: 1px solid var(--xd-line);
+        border-radius:20px;
+
+        background:
+          rgba(255,255,255,.76);
+
+        border:
+          1px solid
+          var(--xd-line);
 
         box-shadow:
-          0 7px 22px rgba(101,73,80,.045);
+          0 7px 22px
+          rgba(101,73,80,.045);
 
-        cursor: pointer;
+        cursor:pointer;
+
+        transition:
+          transform .16s ease,
+          border-color .16s ease;
+      }
+
+      .xd-guest-card:active {
+        transform:scale(.985);
       }
 
       .xd-guest-main {
-        min-width: 0;
-        flex: 1;
+        min-width:0;
+
+        flex:1;
       }
 
       .xd-guest-name {
-        font-size: 15px;
-        font-weight: 780;
+        font-size:15px;
+
+        font-weight:780;
       }
 
       .xd-guest-handle {
-        margin-top: 3px;
+        margin-top:3px;
 
-        font-size: 10px;
+        font-size:10px;
 
-        color: var(--xd-pink);
+        color:var(--xd-pink);
       }
 
       .xd-guest-bio {
-        margin-top: 5px;
+        margin-top:5px;
 
-        font-size: 11px;
+        font-size:10px;
 
-        color: var(--xd-muted);
+        color:var(--xd-muted);
 
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        white-space:nowrap;
+
+        overflow:hidden;
+
+        text-overflow:ellipsis;
       }
 
       .xd-arrow {
-        color: #b3a5a8;
-        font-size: 18px;
+        color:#b3a5a8;
+
+        font-size:18px;
+
+        flex:0 0 auto;
       }
+
+      /* =====================================================
+         嘉宾详情
+         ===================================================== */
+
+      .xd-detail-hero {
+        padding:22px 18px;
+
+        border-radius:26px;
+
+        background:
+          linear-gradient(
+            145deg,
+            rgba(255,255,255,.90),
+            rgba(245,229,231,.76)
+          );
+
+        border:1px solid
+          rgba(157,116,124,.13);
+
+        box-shadow:var(--xd-shadow);
+
+        text-align:center;
+      }
+
+      .xd-detail-hero .xd-avatar {
+        width:82px;
+        height:82px;
+
+        flex-basis:82px;
+
+        margin:0 auto 12px;
+
+        border-radius:25px;
+      }
+
+      .xd-detail-name {
+        font-size:24px;
+
+        font-weight:820;
+
+        letter-spacing:-.04em;
+      }
+
+      .xd-detail-handle {
+        margin-top:4px;
+
+        font-size:10px;
+
+        color:var(--xd-pink);
+      }
+
+      .xd-collapse {
+        margin-top:13px;
+
+        border-radius:18px;
+
+        background:
+          rgba(255,255,255,.72);
+
+        border:1px solid
+          var(--xd-line);
+
+        overflow:hidden;
+      }
+
+      .xd-collapse-head {
+        width:100%;
+
+        border:0;
+
+        background:transparent;
+
+        padding:13px;
+
+        display:flex;
+
+        justify-content:space-between;
+
+        align-items:center;
+
+        cursor:pointer;
+
+        color:var(--xd-text);
+
+        font-size:12px;
+
+        font-weight:750;
+      }
+
+      .xd-collapse-body {
+        display:none;
+
+        padding:
+          0 13px 14px;
+
+        font-size:11px;
+
+        line-height:1.8;
+
+        color:#75696b;
+      }
+
+      .xd-collapse.open .xd-collapse-body {
+        display:block;
+      }
+
+      .xd-relation-box {
+        padding:17px;
+
+        border-radius:22px;
+
+        background:
+          rgba(255,255,255,.76);
+
+        border:1px solid
+          var(--xd-line);
+
+        box-shadow:
+          0 7px 22px
+          rgba(101,73,80,.045);
+      }
+
+      .xd-relation-line {
+        display:flex;
+
+        justify-content:space-between;
+
+        align-items:center;
+
+        gap:12px;
+      }
+
+      .xd-relation-state {
+        font-size:16px;
+
+        font-weight:800;
+
+        color:var(--xd-pink-dark);
+      }
+
+      .xd-tags {
+        display:flex;
+
+        flex-wrap:wrap;
+
+        gap:6px;
+
+        margin-top:13px;
+      }
+
+      .xd-tag {
+        padding:6px 9px;
+
+        border-radius:999px;
+
+        background:
+          var(--xd-pink-faint);
+
+        color:
+          var(--xd-pink-dark);
+
+        font-size:9px;
+
+        font-weight:700;
+      }
+
+      /* =====================================================
+         私信
+         ===================================================== */
+
+      .xd-chat {
+        display:flex;
+
+        flex-direction:column;
+
+        height:100%;
+      }
+
+      .xd-chat-list {
+        flex:1;
+
+        overflow-y:auto;
+
+        padding:
+          18px
+          16px
+          115px;
+
+        scrollbar-width:none;
+      }
+
+      .xd-chat-list::-webkit-scrollbar {
+        display:none;
+      }
+
+      .xd-chat-person {
+        display:flex;
+
+        align-items:center;
+
+        gap:12px;
+
+        padding:
+          13px;
+
+        margin-bottom:17px;
+
+        border-radius:20px;
+
+        background:
+          rgba(255,255,255,.72);
+
+        border:1px solid
+          var(--xd-line);
+      }
+
+      .xd-chat-message {
+        display:flex;
+
+        gap:8px;
+
+        margin-top:13px;
+      }
+
+      .xd-chat-message.me {
+        justify-content:flex-end;
+      }
+
+      .xd-chat-bubble {
+        max-width:78%;
+
+        padding:
+          10px 13px;
+
+        border-radius:
+          17px;
+
+        background:
+          rgba(255,255,255,.82);
+
+        color:#5b4e51;
+
+        font-size:12px;
+
+        line-height:1.65;
+
+        box-shadow:
+          0 4px 15px
+          rgba(101,73,80,.04);
+      }
+
+      .xd-chat-message.me
+      .xd-chat-bubble {
+        background:
+          #ead9dc;
+
+        color:#634c52;
+      }
+
+      .xd-chat-input {
+        position:absolute;
+
+        left:12px;
+        right:12px;
+        bottom:94px;
+
+        display:flex;
+
+        gap:8px;
+
+        padding:8px;
+
+        border-radius:18px;
+
+        background:
+          rgba(255,255,255,.88);
+
+        border:1px solid
+          var(--xd-line);
+
+        box-shadow:
+          0 10px 35px
+          rgba(80,56,63,.10);
+
+        backdrop-filter:
+          blur(20px);
+      }
+
+      .xd-chat-input input {
+        flex:1;
+
+        min-width:0;
+
+        border:0;
+
+        outline:none;
+
+        background:transparent;
+
+        color:var(--xd-text);
+
+        padding:7px;
+      }
+
+      .xd-chat-send {
+        border:0;
+
+        width:35px;
+        height:35px;
+
+        border-radius:12px;
+
+        background:
+          var(--xd-pink);
+
+        color:white;
+
+        cursor:pointer;
+      }
+
+      /* =====================================================
+         观察室
+         ===================================================== */
+
+      .xd-observe-card {
+        padding:17px;
+
+        border-radius:23px;
+
+        background:
+          rgba(255,255,255,.76);
+
+        border:
+          1px solid
+          var(--xd-line);
+
+        box-shadow:
+          0 7px 22px
+          rgba(101,73,80,.045);
+      }
+
+      .xd-observe-scene {
+        padding:13px;
+
+        border-radius:17px;
+
+        background:
+          rgba(245,231,233,.45);
+
+        margin-top:10px;
+      }
+
+      .xd-observe-scene-title {
+        font-size:12px;
+
+        font-weight:780;
+
+        color:var(--xd-pink-dark);
+      }
+
+      .xd-observe-text {
+        margin-top:6px;
+
+        font-size:11px;
+
+        line-height:1.75;
+
+        color:#75696b;
+      }
+
+      /* =====================================================
+         房屋 / 地图
+         ===================================================== */
+
+      .xd-house {
+        position:relative;
+
+        min-height:475px;
+
+        border-radius:30px;
+
+        overflow:hidden;
+
+        background:
+          linear-gradient(
+            145deg,
+            #f9f0ef,
+            #eee0e2
+          );
+
+        border:1px solid
+          rgba(157,116,124,.15);
+
+        box-shadow:var(--xd-shadow);
+      }
+
+      .xd-house-roof {
+        position:absolute;
+
+        left:-8%;
+        right:-8%;
+
+        top:-70px;
+
+        height:190px;
+
+        border-radius:50%;
+
+        background:
+          rgba(255,255,255,.44);
+
+        border:
+          1px solid
+          rgba(184,135,145,.12);
+      }
+
+      .xd-house-title {
+        position:relative;
+
+        z-index:2;
+
+        padding:
+          22px 20px 0;
+      }
+
+      .xd-house-name {
+        font-size:24px;
+
+        font-weight:820;
+
+        letter-spacing:-.04em;
+      }
+
+      .xd-house-sub {
+        margin-top:4px;
+
+        font-size:10px;
+
+        color:var(--xd-muted);
+      }
+
+      .xd-room {
+        position:absolute;
+
+        width:104px;
+        min-height:72px;
+
+        padding:12px;
+
+        border-radius:19px;
+
+        border:1px solid
+          rgba(140,104,112,.12);
+
+        background:
+          rgba(255,255,255,.80);
+
+        box-shadow:
+          0 7px 18px
+          rgba(101,73,80,.06);
+
+        cursor:pointer;
+
+        text-align:left;
+
+        transition:.16s ease;
+      }
+
+      .xd-room:active {
+        transform:scale(.96);
+      }
+
+      .xd-room-icon {
+        font-size:20px;
+      }
+
+      .xd-room-name {
+        margin-top:5px;
+
+        font-size:11px;
+
+        font-weight:800;
+      }
+
+      .xd-room-desc {
+        margin-top:2px;
+
+        font-size:8px;
+
+        color:var(--xd-muted);
+      }
+
+      .xd-room-kitchen {
+        left:18px;
+        top:110px;
+      }
+
+      .xd-room-living {
+        right:18px;
+        top:110px;
+      }
+
+      .xd-room-bath {
+        left:18px;
+        top:220px;
+      }
+
+      .xd-room-bedroom {
+        right:18px;
+        top:220px;
+      }
+
+      .xd-room-garden {
+        left:50%;
+
+        transform:
+          translateX(-50%);
+
+        bottom:28px;
+
+        width:140px;
+      }
+
+      .xd-room-garden:active {
+        transform:
+          translateX(-50%)
+          scale(.96);
+      }
+
+      /* =====================================================
+         手机
+         ===================================================== */
+
+      .xd-phone {
+        position:relative;
+        border-radius:32px;
+        padding:16px;
+        background:linear-gradient(145deg,#efe5e6,#f9f4f3);
+        border:1px solid rgba(157,116,124,.14);
+        box-shadow:var(--xd-shadow);
+        overflow:hidden;
+      }
+
+      .xd-phone::before {
+        content:"";
+        position:absolute;
+        width:170px;
+        height:170px;
+        border-radius:50%;
+        right:-70px;
+        top:-70px;
+        background:rgba(184,135,145,.12);
+      }
+
+      .xd-phone-status {
+        position:relative;
+        z-index:1;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        padding:2px 6px 12px;
+        font-size:9px;
+        color:#75696b;
+        font-weight:700;
+      }
+
+      .xd-phone-title {
+        position:relative;
+        z-index:1;
+        font-size:26px;
+        font-weight:820;
+        letter-spacing:-.05em;
+      }
+
+      .xd-phone-sub {
+        position:relative;
+        z-index:1;
+        margin-top:4px;
+        font-size:10px;
+        color:var(--xd-muted);
+      }
+
+      .xd-phone-apps {
+        position:relative;
+        z-index:1;
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
+        gap:12px 8px;
+        margin-top:22px;
+      }
+
+      .xd-phone-app {
+        border:0;
+        background:transparent;
+        cursor:pointer;
+        text-align:center;
+        color:var(--xd-text);
+      }
+
+      .xd-phone-icon {
+        width:52px;
+        height:52px;
+        margin:0 auto 7px;
+        border-radius:17px;
+        display:grid;
+        place-items:center;
+        font-size:24px;
+        background:rgba(255,255,255,.82);
+        border:1px solid rgba(140,104,112,.10);
+        box-shadow:0 7px 17px rgba(101,73,80,.06);
+      }
+
+      .xd-phone-label {
+        font-size:9px;
+        font-weight:720;
+      }
+
+      .xd-phone-widget {
+        position:relative;
+        z-index:1;
+        margin-top:20px;
+        padding:15px;
+        border-radius:21px;
+        background:rgba(255,255,255,.72);
+        border:1px solid var(--xd-line);
+      }
+
+      .xd-feed-item {
+        padding:12px 0;
+        border-bottom:1px solid rgba(117,91,97,.08);
+      }
+
+      .xd-feed-item:last-child { border-bottom:0; }
+      .xd-feed-head { display:flex; gap:9px; align-items:center; }
+      .xd-feed-avatar {
+        width:32px; height:32px; border-radius:11px; overflow:hidden;
+        background:#eadbde; display:grid; place-items:center;
+        color:var(--xd-pink-dark); font-size:11px; font-weight:800; flex:0 0 32px;
+      }
+      .xd-feed-avatar img { width:100%; height:100%; object-fit:cover; }
+      .xd-feed-name { font-size:10px; font-weight:800; }
+      .xd-feed-time { margin-top:2px; font-size:8px; color:var(--xd-muted); }
+      .xd-feed-text { margin-top:8px; font-size:11px; line-height:1.7; color:#5f5356; }
+      .xd-feed-meta { margin-top:7px; font-size:9px; color:var(--xd-pink); }
+
+      .xd-phone-list { display:grid; gap:10px; }
+      .xd-phone-list-card {
+        padding:14px; border-radius:19px; background:rgba(255,255,255,.76);
+        border:1px solid var(--xd-line); cursor:pointer;
+      }
+      .xd-phone-list-title { font-size:13px; font-weight:800; }
+      .xd-phone-list-desc { margin-top:4px; font-size:10px; color:var(--xd-muted); line-height:1.6; }
+
+      /* =====================================================
+         世界书
+         ===================================================== */
+
+      .xd-worldbook-card {
+        padding:15px;
+        border-radius:21px;
+        background:rgba(255,255,255,.76);
+        border:1px solid var(--xd-line);
+        box-shadow:0 7px 22px rgba(101,73,80,.04);
+      }
+      .xd-worldbook-type { font-size:8px; letter-spacing:.12em; color:var(--xd-pink); font-weight:800; }
+      .xd-worldbook-name { margin-top:5px; font-size:14px; font-weight:800; }
+      .xd-worldbook-desc { margin-top:5px; font-size:10px; line-height:1.6; color:var(--xd-muted); }
+      .xd-worldbook-content {
+        margin-top:10px; padding:10px; border-radius:13px; background:#fbf7f7;
+        font-size:10px; line-height:1.7; color:#75696b; white-space:pre-wrap;
+        max-height:95px; overflow:hidden;
+      }
+      .xd-worldbook-actions { display:flex; gap:7px; margin-top:10px; }
 
       /* =====================================================
          档案
          ===================================================== */
 
       .xd-archive {
-        position: relative;
+        position:relative;
 
-        padding: 18px;
+        padding:18px;
 
-        border-radius: 23px;
+        border-radius:23px;
 
         background:
           linear-gradient(
@@ -1444,260 +1699,500 @@
             rgba(245,229,231,.70)
           );
 
-        border: 1px solid var(--xd-line);
+        border:1px solid
+          var(--xd-line);
 
-        box-shadow: var(--xd-shadow);
+        box-shadow:var(--xd-shadow);
 
-        overflow: hidden;
+        overflow:hidden;
       }
 
       .xd-archive-title {
-        font-size: 20px;
-        font-weight: 800;
-        letter-spacing: -.035em;
+        font-size:20px;
+
+        font-weight:800;
+
+        letter-spacing:-.035em;
       }
 
       .xd-archive-meta {
-        margin-top: 6px;
+        margin-top:6px;
 
-        font-size: 10px;
-        color: var(--xd-muted);
+        font-size:10px;
+
+        color:var(--xd-muted);
+      }
+
+      .xd-archive-summary {
+        margin-top:13px;
+
+        color:#76696b;
+
+        font-size:11px;
+
+        line-height:1.7;
       }
 
       .xd-archive-actions {
-        display: flex;
-        gap: 8px;
-        margin-top: 14px;
+        display:flex;
+
+        gap:8px;
+
+        margin-top:14px;
       }
 
       .xd-small-btn {
-        flex: 1;
+        flex:1;
 
-        border: 1px solid rgba(140,104,112,.13);
+        border:
+          1px solid
+          rgba(140,104,112,.13);
 
-        background: rgba(255,255,255,.65);
+        background:
+          rgba(255,255,255,.65);
 
-        color: var(--xd-pink-dark);
+        color:
+          var(--xd-pink-dark);
 
-        border-radius: 13px;
+        border-radius:13px;
 
-        padding: 9px;
+        padding:9px;
 
-        font-size: 10px;
-        font-weight: 720;
+        font-size:10px;
 
-        cursor: pointer;
+        font-weight:720;
+
+        cursor:pointer;
       }
 
       .xd-new-archive {
-        width: 100%;
+        width:100%;
 
-        margin-top: 11px;
+        margin-top:11px;
 
-        padding: 15px;
+        padding:15px;
 
-        border-radius: 19px;
+        border-radius:19px;
 
-        border: 1px dashed rgba(167,121,131,.25);
+        border:
+          1px dashed
+          rgba(167,121,131,.25);
 
-        background: rgba(255,255,255,.36);
+        background:
+          rgba(255,255,255,.36);
 
-        color: var(--xd-pink-dark);
+        color:
+          var(--xd-pink-dark);
 
-        font-size: 12px;
-        font-weight: 750;
+        font-size:12px;
 
-        cursor: pointer;
+        font-weight:750;
+
+        cursor:pointer;
       }
 
       /* =====================================================
-         Modal
+         空状态
+         ===================================================== */
+
+      .xd-empty {
+        text-align:center;
+
+        padding:38px 20px;
+
+        border-radius:23px;
+
+        border:
+          1px dashed
+          rgba(140,104,112,.18);
+
+        background:
+          rgba(255,255,255,.42);
+      }
+
+      .xd-empty-icon {
+        font-size:27px;
+
+        margin-bottom:9px;
+
+        opacity:.8;
+      }
+
+      .xd-empty-title {
+        font-size:15px;
+
+        font-weight:780;
+      }
+
+      .xd-empty-text {
+        margin-top:6px;
+
+        font-size:11px;
+
+        line-height:1.7;
+
+        color:var(--xd-muted);
+      }
+
+      /* =====================================================
+         按钮
+         ===================================================== */
+
+      .xd-primary {
+        border:0;
+
+        border-radius:15px;
+
+        padding:11px 16px;
+
+        background:#a97983;
+
+        color:white;
+
+        font-size:12px;
+
+        font-weight:750;
+
+        cursor:pointer;
+
+        box-shadow:
+          0 7px 18px
+          rgba(132,91,101,.18);
+      }
+
+      .xd-primary:active {
+        transform:scale(.98);
+      }
+
+      /* =====================================================
+         创建恋综选择器
+         ===================================================== */
+
+      .xd-selector-list {
+        display:grid;
+
+        gap:8px;
+
+        margin-top:10px;
+
+        max-height:280px;
+
+        overflow-y:auto;
+      }
+
+      .xd-selector {
+        width:100%;
+
+        border:
+          1px solid
+          rgba(140,104,112,.12);
+
+        background:
+          rgba(255,255,255,.75);
+
+        border-radius:17px;
+
+        padding:10px;
+
+        display:flex;
+
+        align-items:center;
+
+        gap:10px;
+
+        text-align:left;
+
+        cursor:pointer;
+      }
+
+      .xd-selector.selected {
+        border-color:
+          rgba(184,135,145,.50);
+
+        background:
+          #f8edef;
+
+        box-shadow:
+          0 0 0 2px
+          rgba(184,135,145,.07);
+      }
+
+      .xd-check {
+        margin-left:auto;
+
+        width:21px;
+        height:21px;
+
+        border-radius:50%;
+
+        border:1px solid
+          rgba(140,104,112,.18);
+
+        display:grid;
+
+        place-items:center;
+
+        color:transparent;
+
+        font-size:11px;
+      }
+
+      .xd-selector.selected .xd-check {
+        background:
+          var(--xd-pink);
+
+        border-color:
+          var(--xd-pink);
+
+        color:white;
+      }
+
+      /* =====================================================
+         设置
+         ===================================================== */
+
+      .xd-setting-card {
+        padding:15px;
+
+        border-radius:20px;
+
+        background:
+          rgba(255,255,255,.76);
+
+        border:
+          1px solid
+          var(--xd-line);
+      }
+
+      .xd-setting-row {
+        display:flex;
+
+        align-items:center;
+
+        justify-content:space-between;
+
+        gap:15px;
+
+        padding:11px 0;
+
+        border-bottom:
+          1px solid
+          rgba(117,91,97,.08);
+      }
+
+      .xd-setting-row:last-child {
+        border-bottom:0;
+      }
+
+      .xd-setting-name {
+        font-size:12px;
+
+        font-weight:760;
+      }
+
+      .xd-setting-desc {
+        margin-top:3px;
+
+        font-size:9px;
+
+        line-height:1.5;
+
+        color:var(--xd-muted);
+      }
+
+      .xd-switch {
+        width:45px;
+        height:27px;
+
+        border:0;
+
+        border-radius:999px;
+
+        background:#d8ccce;
+
+        position:relative;
+
+        cursor:pointer;
+
+        flex:0 0 auto;
+      }
+
+      .xd-switch::after {
+        content:"";
+
+        position:absolute;
+
+        width:21px;
+        height:21px;
+
+        border-radius:50%;
+
+        background:white;
+
+        left:3px;
+        top:3px;
+
+        transition:.18s ease;
+
+        box-shadow:
+          0 2px 7px
+          rgba(70,50,55,.13);
+      }
+
+      .xd-switch.on {
+        background:
+          var(--xd-pink);
+      }
+
+      .xd-switch.on::after {
+        transform:
+          translateX(18px);
+      }
+
+      /* =====================================================
+         弹窗
          ===================================================== */
 
       .xd-modal-wrap {
-        position: absolute;
-        inset: 0;
+        position:absolute;
 
-        z-index: 100;
+        inset:0;
 
-        background: rgba(67,51,55,.20);
+        z-index:100;
 
-        backdrop-filter: blur(5px);
+        background:
+          rgba(67,51,55,.20);
 
-        display: flex;
-        align-items: flex-end;
-        justify-content: center;
+        backdrop-filter:blur(5px);
+
+        display:flex;
+
+        align-items:flex-end;
+
+        justify-content:center;
       }
 
       .xd-modal {
-        width: 100%;
-        max-height: 88%;
+        width:100%;
 
-        overflow-y: auto;
+        max-height:88%;
 
-        background: #fbf8f7;
+        overflow-y:auto;
 
-        border-radius: 28px 28px 0 0;
+        background:#fbf8f7;
 
-        padding: 21px 17px 28px;
+        border-radius:
+          28px 28px 0 0;
+
+        padding:
+          21px
+          17px
+          28px;
 
         box-shadow:
-          0 -12px 45px rgba(72,51,57,.15);
+          0 -12px 45px
+          rgba(72,51,57,.15);
       }
 
       .xd-modal-handle {
-        width: 37px;
-        height: 4px;
+        width:37px;
+        height:4px;
 
-        border-radius: 99px;
+        border-radius:99px;
 
-        background: #d7c8ca;
+        background:#d7c8ca;
 
-        margin: -5px auto 17px;
+        margin:
+          -5px auto 17px;
       }
 
       .xd-modal-title {
-        font-size: 20px;
-        font-weight: 800;
-        letter-spacing: -.03em;
+        font-size:20px;
+
+        font-weight:800;
+
+        letter-spacing:-.03em;
       }
 
       .xd-field {
-        margin-top: 15px;
+        margin-top:15px;
       }
 
       .xd-field label {
-        display: block;
+        display:block;
 
-        font-size: 10px;
+        font-size:10px;
 
-        color: var(--xd-muted);
+        color:var(--xd-muted);
 
-        font-weight: 700;
+        font-weight:700;
 
-        margin-bottom: 7px;
+        margin-bottom:7px;
       }
 
       .xd-field input,
       .xd-field textarea {
-        width: 100%;
+        width:100%;
 
-        border: 1px solid rgba(140,104,112,.15);
+        border:
+          1px solid
+          rgba(140,104,112,.15);
 
-        background: white;
+        background:white;
 
-        color: var(--xd-text);
+        color:var(--xd-text);
 
-        border-radius: 14px;
+        border-radius:14px;
 
-        padding: 12px;
+        padding:12px;
 
-        outline: none;
+        outline:none;
+
+        resize:none;
       }
 
-      .xd-field textarea {
-        min-height: 80px;
-        resize: vertical;
-      }
+      .xd-field input:focus,
+      .xd-field textarea:focus {
+        border-color:
+          rgba(184,135,145,.45);
 
-      .xd-check-list {
-        display: grid;
-        gap: 8px;
-      }
-
-      .xd-check {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-
-        padding: 11px 12px;
-
-        border-radius: 14px;
-
-        background: white;
-
-        border: 1px solid rgba(140,104,112,.10);
-
-        cursor: pointer;
-      }
-
-      .xd-check input {
-        width: 17px;
-        height: 17px;
-        flex: 0 0 17px;
-      }
-
-      .xd-check-main {
-        min-width: 0;
-        flex: 1;
-      }
-
-      .xd-check-title {
-        font-size: 11px;
-        font-weight: 750;
-      }
-
-      .xd-check-desc {
-        margin-top: 3px;
-
-        color: var(--xd-muted);
-
-        font-size: 9px;
-        line-height: 1.5;
+        box-shadow:
+          0 0 0 3px
+          rgba(184,135,145,.08);
       }
 
       .xd-modal-actions {
-        display: flex;
-        gap: 8px;
-        margin-top: 18px;
+        display:flex;
+
+        gap:8px;
+
+        margin-top:18px;
       }
 
       .xd-modal-actions button {
-        flex: 1;
+        flex:1;
       }
 
       /* =====================================================
-         世界书库
+         桌面
          ===================================================== */
 
-      .xd-library-card {
-        padding: 15px;
+      @media (min-width:700px) {
 
-        border-radius: 19px;
-
-        background: rgba(255,255,255,.76);
-
-        border: 1px solid var(--xd-line);
-      }
-
-      .xd-library-card + .xd-library-card {
-        margin-top: 8px;
-      }
-
-      .xd-library-title {
-        font-size: 13px;
-        font-weight: 780;
-      }
-
-      .xd-library-meta {
-        margin-top: 4px;
-
-        font-size: 9px;
-        color: var(--xd-muted);
-      }
-
-      /* =====================================================
-         响应式
-         ===================================================== */
-
-      @media (min-width: 700px) {
         .roche-plugin-xindong-xianchang {
-          max-width: 520px;
-          margin: 0 auto;
+          max-width:520px;
 
-          border-left: 1px solid rgba(120,90,96,.08);
-          border-right: 1px solid rgba(120,90,96,.08);
+          margin:0 auto;
+
+          border-left:
+            1px solid
+            rgba(120,90,96,.08);
+
+          border-right:
+            1px solid
+            rgba(120,90,96,.08);
         }
+
       }
     `;
 
@@ -1718,7 +2213,9 @@
             class="xd-back"
             data-action="back"
             aria-label="返回 Roche"
-          >‹</button>
+          >
+            ‹
+          </button>
 
           <div class="xd-heading">
             <div class="xd-eyebrow">
@@ -1734,7 +2231,9 @@
             <span
               class="xd-topday-main"
               data-top-day
-            >DAY 01</span>
+            >
+              DAY 01
+            </span>
 
             <span class="xd-topday-sub">
               ON AIR
@@ -1743,10 +2242,10 @@
 
           <button
             class="xd-settings"
-            data-settings
-            aria-label="设置"
+            data-action="settings"
+            aria-label="恋综设置"
           >
-            <span class="xd-settings-heart">♡</span>
+            ⚙
           </button>
 
         </header>
@@ -1765,32 +2264,52 @@
             class="xd-tab active"
             data-tab="show"
           >
-            <span class="xd-tab-icon">▣</span>
-            <span class="xd-tab-label">节目</span>
+            <span class="xd-tab-icon">
+              ▣
+            </span>
+
+            <span class="xd-tab-label">
+              节目
+            </span>
           </button>
 
           <button
             class="xd-tab"
             data-tab="guests"
           >
-            <span class="xd-tab-icon">♧</span>
-            <span class="xd-tab-label">嘉宾</span>
+            <span class="xd-tab-icon">
+              ♧
+            </span>
+
+            <span class="xd-tab-label">
+              嘉宾档案
+            </span>
           </button>
 
           <button
             class="xd-tab"
             data-tab="phone"
           >
-            <span class="xd-tab-icon">⌕</span>
-            <span class="xd-tab-label">我的手机</span>
+            <span class="xd-tab-icon">
+              ◫
+            </span>
+
+            <span class="xd-tab-label">
+              我的手机
+            </span>
           </button>
 
           <button
             class="xd-tab"
             data-tab="archives"
           >
-            <span class="xd-tab-icon">▤</span>
-            <span class="xd-tab-label">档案</span>
+            <span class="xd-tab-icon">
+              ▤
+            </span>
+
+            <span class="xd-tab-label">
+              档案
+            </span>
           </button>
 
         </nav>
@@ -1802,47 +2321,58 @@
       .querySelectorAll("[data-tab]")
       .forEach((button) => {
 
-        const handler = () => {
-          state.activeTab = button.dataset.tab;
+        listen(button, "click", () => {
+
+          state.activeTab =
+            button.dataset.tab;
+
+          state.page = "tab";
+          state.stack = [];
+
           renderPage();
-        };
+        });
 
-        button.addEventListener("click", handler);
-
-        state.listeners.push(() =>
-          button.removeEventListener("click", handler)
-        );
       });
 
     const back =
-      state.container.querySelector("[data-action='back']");
+      state.container.querySelector(
+        "[data-action='back']"
+      );
 
-    const backHandler = () => {
+    listen(back, "click", () => {
+
+      if (state.page !== "tab") {
+
+        state.page = "tab";
+        state.stack = [];
+
+        renderPage();
+
+        return;
+      }
+
       try {
         state.roche.ui.closeApp();
       } catch {
         toast("无法返回 Roche");
       }
-    };
 
-    back.addEventListener("click", backHandler);
-
-    state.listeners.push(() =>
-      back.removeEventListener("click", backHandler)
-    );
+    });
 
     const settings =
-      state.container.querySelector("[data-settings]");
+      state.container.querySelector(
+        "[data-action='settings']"
+      );
 
-    const settingsHandler = () => {
+    listen(settings, "click", () => {
+
+      if (!state.currentArchive) {
+        toast("请先创建一个恋综档案");
+        return;
+      }
+
       openSettings();
-    };
-
-    settings.addEventListener("click", settingsHandler);
-
-    state.listeners.push(() =>
-      settings.removeEventListener("click", settingsHandler)
-    );
+    });
   }
 
   /* =========================================================
@@ -1850,35 +2380,38 @@
      ========================================================= */
 
   function avatarHTML(item, className = "xd-avatar") {
-    const src = avatar(item);
+
+    const src = avatarOf(item);
 
     if (src) {
+
       return `
         <div class="${className}">
           <img
-            src="${escapeHTML(src)}"
+            src="${esc(src)}"
             alt=""
           >
         </div>
       `;
+
     }
 
-    const text =
-      escapeHTML(
-        realName(item, "♡").slice(0, 1)
-      );
+    const first =
+      nameOf(item, "♡")
+        .slice(0, 1);
 
     return `
       <div class="${className}">
-        ${text}
+        ${esc(first)}
       </div>
     `;
   }
 
   function pageHead(kicker, title, note = "") {
+
     return `
       <div class="xd-kicker">
-        ${escapeHTML(kicker)}
+        ${esc(kicker)}
       </div>
 
       <div
@@ -1886,78 +2419,130 @@
         style="margin-top:5px;"
       >
         <div class="xd-section-title">
-          ${escapeHTML(title)}
+          ${esc(title)}
         </div>
 
         ${
           note
             ? `
               <div class="xd-section-note">
-                ${escapeHTML(note)}
+                ${esc(note)}
               </div>
             `
             : ""
         }
+
       </div>
     `;
   }
 
   /* =========================================================
-     主节目页
+     节目页
      ========================================================= */
 
   function renderShow() {
-    const archive = state.currentArchive;
+
+    const archive =
+      state.currentArchive;
+
+    const day =
+      archive?.currentDay || 1;
+
+    const scene =
+      archive?.currentSceneLabel ||
+      "心动小屋 · 客厅";
+
+    const narrative =
+      archive?.lastNarrative ||
+      "夕阳落进客厅的玻璃窗。节目组没有宣布新的任务，空气却比往常安静了一些。几个人各自做着手里的事，偶尔的目光交错，让今晚显得格外微妙。";
+
+    const quote =
+      archive?.lastQuote ||
+      "“你今天……好像一直在看我。”";
 
     if (!archive) {
+
       return `
         <div class="xd-page">
 
           ${pageHead(
             "TONIGHT · LIVE",
-            "还没有开始本季节目",
-            "NEW SEASON"
+            "心动现场",
+            "还没有正在进行的恋综"
           )}
 
           <section class="xd-hero">
 
             <div class="xd-kicker">
-              WELCOME TO LOVE
+              READY TO START
             </div>
 
             <div class="xd-hero-title">
-              心动现场
+              开始一场新的心动。
             </div>
 
             <div class="xd-hero-sub">
-              先创建一个属于你的恋综世界，
-              选择你的身份、嘉宾与世界书，
-              然后节目才会真正开始。
+              先创建属于你的恋综世界，
+              再选择本季入住的嘉宾。
+              Roche 中的其他角色不会自动进入节目。
             </div>
 
             <button
               class="xd-primary"
               data-new-archive
             >
-              开始新的恋综
+              ＋ 创建新的恋综
             </button>
 
           </section>
 
+          <div class="xd-section-head">
+            <div class="xd-section-title">
+              你会遇见什么？
+            </div>
+          </div>
+
+          <div class="xd-play-grid">
+
+            <button
+              class="xd-play-card"
+              data-open-house
+            >
+              <div class="xd-play-icon">
+                🏠
+              </div>
+
+              <div class="xd-play-title">
+                心动小屋
+              </div>
+
+              <div class="xd-play-desc">
+                探索不同地点与互动玩法
+              </div>
+            </button>
+
+            <button
+              class="xd-play-card"
+              data-open-observe
+            >
+              <div class="xd-play-icon">
+                👀
+              </div>
+
+              <div class="xd-play-title">
+                观察室
+              </div>
+
+              <div class="xd-play-desc">
+                偷看你不在场时发生的事情
+              </div>
+            </button>
+
+          </div>
+
         </div>
       `;
     }
-
-    const day =
-      archive.currentDay || 1;
-
-    const scene =
-      archive.currentSceneLabel ||
-      "心动小屋 · 客厅";
-
-    const narrative =
-      archive.lastNarrative ||
-      "节目正式开机。今天没有人知道镜头之外会发生什么。";
 
     return `
       <div class="xd-page">
@@ -1971,101 +2556,118 @@
         <section class="xd-hero">
 
           <div class="xd-kicker">
-            EPISODE ${String(day).padStart(2, "0")}
+            EPISODE
+            ${String(day).padStart(2, "0")}
           </div>
 
           <div class="xd-hero-title">
-            ${escapeHTML(archive.title)}
+            ${esc(archive.title)}
           </div>
 
           <div class="xd-hero-sub">
-            一场关于靠近、试探、
-            偶遇与心动的真人秀。
+            一场关于靠近、试探与心动的真人秀。
+            没有人知道下一秒谁会先动心。
           </div>
 
           <div class="xd-live">
             <span class="xd-live-dot"></span>
-            LIVE · ${escapeHTML(scene)}
+            LIVE · ${esc(scene)}
           </div>
 
         </section>
 
-        <!-- 小屋入口 -->
         <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            今晚的现场
+          </div>
+
+          <div class="xd-section-note">
+            DAY
+            ${String(day).padStart(2, "0")}
+            ·
+            ${esc(
+              archive.currentTime ||
+              "20:36"
+            )}
+          </div>
+
+        </div>
+
+        <section class="xd-scene">
+
+          <div class="xd-scene-label">
+            ${esc(scene)}
+          </div>
+
+          <div class="xd-narrative">
+            ${esc(narrative)}
+          </div>
+
+          <div class="xd-quote">
+            ${esc(quote)}
+          </div>
+
+        </section>
+
+        <!-- 房屋入口 -->
+
+        <div class="xd-section-head">
+
           <div class="xd-section-title">
             心动小屋
           </div>
 
           <div class="xd-section-note">
-            HOUSE MAP
+            EXPLORE
           </div>
+
         </div>
 
-        <section
-          class="xd-house"
-          data-open-house
-        >
+        <div class="xd-play-grid">
 
-          <div class="xd-house-wall"></div>
+          <button
+            class="xd-play-card"
+            data-open-house
+          >
 
-          <div class="xd-house-title">
-            <div class="xd-kicker">
-              HOME
+            <div class="xd-play-icon">
+              🏠
             </div>
 
-            <div class="xd-house-name">
-              心动小屋
+            <div class="xd-play-title">
+              进入心动小屋
             </div>
-          </div>
 
-          <div
-            class="xd-room living"
-            data-room="living"
+            <div class="xd-play-desc">
+              自由选择地点与节目玩法
+            </div>
+
+          </button>
+
+          <button
+            class="xd-play-card"
+            data-open-observe
           >
-            <div class="xd-room-icon">🛋</div>
-            <div class="xd-room-name">客厅</div>
-            <div class="xd-room-sub">LIVING ROOM</div>
-          </div>
 
-          <div
-            class="xd-room kitchen"
-            data-room="kitchen"
-          >
-            <div class="xd-room-icon">🍳</div>
-            <div class="xd-room-name">厨房</div>
-            <div class="xd-room-sub">KITCHEN</div>
-          </div>
+            <div class="xd-play-icon">
+              👀
+            </div>
 
-          <div
-            class="xd-room garden"
-            data-room="garden"
-          >
-            <div class="xd-room-icon">🌿</div>
-            <div class="xd-room-name">花园</div>
-            <div class="xd-room-sub">GARDEN</div>
-          </div>
+            <div class="xd-play-title">
+              观察室
+            </div>
 
-          <div
-            class="xd-room bedroom"
-            data-room="bedroom"
-          >
-            <div class="xd-room-icon">♡</div>
-            <div class="xd-room-name">房间</div>
-            <div class="xd-room-sub">ROOMS</div>
-          </div>
+            <div class="xd-play-desc">
+              看看你不在的时候发生了什么
+            </div>
 
-          <div
-            class="xd-room balcony"
-            data-room="balcony"
-          >
-            <div class="xd-room-icon">☾</div>
-            <div class="xd-room-name">阳台</div>
-            <div class="xd-room-sub">BALCONY</div>
-          </div>
+          </button>
 
-        </section>
+        </div>
 
-        <!-- 今日玩法与小屋彻底分开 -->
+        <!-- 今日玩法 -->
+
         <div class="xd-section-head">
 
           <div class="xd-section-title">
@@ -2073,544 +2675,147 @@
           </div>
 
           <div class="xd-section-note">
-            TODAY'S EVENTS
+            TODAY
           </div>
 
         </div>
 
-        <div class="xd-card-grid">
-          ${renderDailyEvents()}
-        </div>
+        <div class="xd-play-grid">
 
-        <!-- 观察室只有节目页入口 -->
-        <div class="xd-section-head">
-
-          <div class="xd-section-title">
-            观察室
-          </div>
-
-          <div class="xd-section-note">
-            OFF CAMERA
-          </div>
-
-        </div>
-
-        <section
-          class="xd-observe-card"
-          data-open-observe
-        >
-
-          <div class="xd-kicker">
-            CAMERA OFF
-          </div>
-
-          <div
-            style="
-              margin-top:6px;
-              font-size:18px;
-              font-weight:800;
-            "
-          >
-            当你不在的时候……
-          </div>
-
-          <div
-            style="
-              margin-top:6px;
-              font-size:11px;
-              color:#8e8183;
-              line-height:1.7;
-            "
-          >
-            看看镜头之外的小屋里，
-            他们正在做什么。
-          </div>
-
-          <div
-            style="
-              margin-top:13px;
-              color:#a97983;
-              font-size:10px;
-              font-weight:750;
-            "
-          >
-            进入观察室 →
-          </div>
-
-        </section>
-
-      </div>
-    `;
-  }
-
-  /* =========================================================
-     今日玩法
-     ========================================================= */
-
-  const DEFAULT_EVENTS = [
-    {
-      id: "kitchen-battle",
-      icon: "🍳",
-      title: "厨房挑战",
-      place: "厨房",
-      placeId: "kitchen",
-      desc: "节目组突然宣布今天的晚餐由嘉宾共同完成。",
-    },
-    {
-      id: "living-question",
-      icon: "💗",
-      title: "心动问答",
-      place: "客厅",
-      placeId: "living",
-      desc: "节目组留下了一组不能轻易回答的问题。",
-    },
-    {
-      id: "garden-time",
-      icon: "🌿",
-      title: "花园偶遇",
-      place: "花园",
-      placeId: "garden",
-      desc: "晚风刚好，镜头没有跟得太紧。",
-    },
-  ];
-
-  function getDailyEvents() {
-    const archive = state.currentArchive;
-
-    if (!archive) return [];
-
-    if (
-      Array.isArray(archive.dailyEvents) &&
-      archive.dailyEvents.length
-    ) {
-      return archive.dailyEvents;
-    }
-
-    return DEFAULT_EVENTS;
-  }
-
-  function renderDailyEvents() {
-    return getDailyEvents()
-      .map((event) => `
-        <article
-          class="xd-event-card"
-          data-event-id="${escapeHTML(event.id)}"
-        >
-
-          <div class="xd-event-top">
-
-            <div class="xd-event-icon">
-              ${escapeHTML(event.icon || "✦")}
-            </div>
-
-            <div class="xd-event-main">
-
-              <div class="xd-event-title">
-                ${escapeHTML(event.title)}
-              </div>
-
-              <div class="xd-event-meta">
-                ${escapeHTML(event.place || "PROGRAM")}
-              </div>
-
-            </div>
-
-            <div class="xd-event-arrow">
-              ›
-            </div>
-
-          </div>
-
-          <div class="xd-event-desc">
-            ${escapeHTML(event.desc || "今日节目事件。")}
-          </div>
-
-        </article>
-      `)
-      .join("");
-  }
-
-  async function triggerDailyEvent(eventId) {
-    const event =
-      getDailyEvents().find(
-        (item) => item.id === eventId
-      );
-
-    if (!event || !state.currentArchive) return;
-
-    state.currentArchive.currentSceneLabel =
-      `心动小屋 · ${event.place}`;
-
-    state.currentArchive.activeEvent = {
-      id: event.id,
-      title: event.title,
-      place: event.place,
-      startedAt: Date.now(),
-    };
-
-    state.currentArchive.lastNarrative =
-      `节目组临时宣布了「${event.title}」。所有人的注意力都开始向${event.place}聚拢。`;
-
-    state.currentArchive.lastQuote =
-      "“看来今晚不会像平时那么安静了。”";
-
-    await saveCurrentArchive();
-
-    state.currentHouseView =
-      event.placeId || "living";
-
-    renderPage();
-    updateTopDay();
-
-    toast(`已进入：${event.title}`);
-  }
-
-  /* =========================================================
-     小屋地点
-     ========================================================= */
-
-  const HOUSE_INFO = {
-    living: {
-      title: "客厅",
-      icon: "🛋",
-      desc: "节目最容易发生交集的地方。有人聊天，有人观察，也有人故意坐在离某个人近一点的位置。",
-    },
-
-    kitchen: {
-      title: "厨房",
-      icon: "🍳",
-      desc: "晚餐、偷偷帮忙、厨房挑战，以及一些镜头之外的小互动都会在这里发生。",
-    },
-
-    garden: {
-      title: "花园",
-      icon: "🌿",
-      desc: "这里没有那么多摄像机。有人散步，有人透气，也可能发生一场没有被节目组安排的谈话。",
-    },
-
-    bedroom: {
-      title: "房间",
-      icon: "♡",
-      desc: "一天结束之后，每个人回到自己的私人空间。这里更多记录独处状态。",
-    },
-
-    balcony: {
-      title: "阳台",
-      icon: "☾",
-      desc: "夜晚的小屋最安静的地方。适合一个人吹风，也适合两个人偶然碰面。",
-    },
-  };
-
-  function renderHouseLocation(locationId) {
-    const info =
-      HOUSE_INFO[locationId] ||
-      HOUSE_INFO.living;
-
-    const chars = currentCharacters();
-
-    const present =
-      state.currentArchive?.locationState?.[locationId]
-        ?.characterIds || [];
-
-    return `
-      <div class="xd-page">
-
-        <div
-          style="
-            display:flex;
-            align-items:center;
-            gap:8px;
-            margin-bottom:12px;
-          "
-        >
           <button
-            class="xd-small-btn"
-            style="flex:0 0 auto;width:auto;"
-            data-house-back
+            class="xd-play-card"
+            data-play="kitchen"
           >
-            ← 小屋
+            <div class="xd-play-icon">
+              🍳
+            </div>
+
+            <div class="xd-play-title">
+              厨房大战
+            </div>
+
+            <div class="xd-play-desc">
+              一场看似普通的晚餐准备
+            </div>
           </button>
 
-          <div class="xd-section-note">
-            HOUSE / LOCATION
-          </div>
-        </div>
-
-        <section class="xd-location-card">
-
-          <div
-            style="
-              font-size:32px;
-            "
-          >
-            ${info.icon}
-          </div>
-
-          <div class="xd-location-title">
-            ${escapeHTML(info.title)}
-          </div>
-
-          <div class="xd-location-desc">
-            ${escapeHTML(info.desc)}
-          </div>
-
-          <div class="xd-kicker" style="margin-top:17px;">
-            NOW HERE
-          </div>
-
-          <div class="xd-presence">
-
-            ${
-              present.length
-                ? present
-                    .map((id) => {
-                      const char =
-                        selectedCharacter(id);
-
-                      return char
-                        ? `
-                          <span class="xd-presence-chip">
-                            ${escapeHTML(
-                              realName(char)
-                            )}
-                          </span>
-                        `
-                        : "";
-                    })
-                    .join("")
-                : `
-                  <span
-                    style="
-                      color:#9a898d;
-                      font-size:10px;
-                    "
-                  >
-                    暂时没有记录到具体人物。
-                  </span>
-                `
-            }
-
-          </div>
-
-        </section>
-
-        <div class="xd-section-head">
-          <div class="xd-section-title">
-            这里可能发生
-          </div>
-        </div>
-
-        <div class="xd-card-grid">
-
-          ${
-            getDailyEvents()
-              .filter(
-                (event) =>
-                  event.placeId === locationId
-              )
-              .map(
-                (event) => `
-                  <article
-                    class="xd-event-card"
-                    data-event-id="${escapeHTML(event.id)}"
-                  >
-
-                    <div class="xd-event-top">
-
-                      <div class="xd-event-icon">
-                        ${escapeHTML(event.icon)}
-                      </div>
-
-                      <div class="xd-event-main">
-
-                        <div class="xd-event-title">
-                          ${escapeHTML(event.title)}
-                        </div>
-
-                        <div class="xd-event-meta">
-                          TODAY'S EVENT
-                        </div>
-
-                      </div>
-
-                      <div class="xd-event-arrow">
-                        ›
-                      </div>
-
-                    </div>
-
-                    <div class="xd-event-desc">
-                      ${escapeHTML(event.desc)}
-                    </div>
-
-                  </article>
-                `
-              )
-              .join("")
-          }
-
-        </div>
-
-      </div>
-    `;
-  }
-
-  /* =========================================================
-     观察室
-     ========================================================= */
-
-  function renderObservationRoom() {
-    const archive = state.currentArchive;
-
-    const logs =
-      archive?.observationLog || [];
-
-    return `
-      <div class="xd-page">
-
-        <div
-          style="
-            display:flex;
-            align-items:center;
-            gap:8px;
-            margin-bottom:12px;
-          "
-        >
           <button
-            class="xd-small-btn"
-            style="flex:0 0 auto;width:auto;"
-            data-observe-back
+            class="xd-play-card"
+            data-play="message"
           >
-            ← 节目
+            <div class="xd-play-icon">
+              💌
+            </div>
+
+            <div class="xd-play-title">
+              匿名短信夜
+            </div>
+
+            <div class="xd-play-desc">
+              收到一条没有署名的消息
+            </div>
           </button>
 
-          <div class="xd-section-note">
-            OFF CAMERA
-          </div>
+          <button
+            class="xd-play-card"
+            data-play="gift"
+          >
+            <div class="xd-play-icon">
+              🎁
+            </div>
+
+            <div class="xd-play-title">
+              心动礼物
+            </div>
+
+            <div class="xd-play-desc">
+              今天有人为你准备了东西
+            </div>
+          </button>
+
         </div>
-
-        ${pageHead(
-          "OBSERVATION ROOM",
-          "观察室",
-          "镜头之外"
-        )}
-
-        <section class="xd-observe-card">
-
-          <div class="xd-kicker">
-            WHEN YOU ARE AWAY
-          </div>
-
-          <div
-            style="
-              margin-top:7px;
-              font-size:22px;
-              font-weight:800;
-              letter-spacing:-.04em;
-            "
-          >
-            他们正在做什么？
-          </div>
-
-          <div
-            style="
-              margin-top:7px;
-              color:#8e8183;
-              font-size:11px;
-              line-height:1.7;
-            "
-          >
-            这里记录玩家不在场时，
-            小屋里自然发生的互动。
-          </div>
-
-        </section>
 
         <div class="xd-section-head">
+
           <div class="xd-section-title">
-            镜头外记录
+            观众席
           </div>
 
           <div class="xd-section-note">
-            ${logs.length} 条
+            LIVE DANMU
           </div>
+
         </div>
 
-        <section class="xd-observe-card">
+        <div class="xd-danmu">
 
-          ${
-            logs.length
-              ? logs
-                  .map(
-                    (item) => `
-                      <div class="xd-observe-row">
+          <span>
+            这气氛突然不对劲了
+          </span>
 
-                        <div class="xd-observe-avatar">
-                          ${
-                            item.avatar
-                              ? `
-                                <img
-                                  src="${escapeHTML(item.avatar)}"
-                                  alt=""
-                                >
-                              `
-                              : "♡"
-                          }
-                        </div>
+          <span>
+            救命谁先移开视线
+          </span>
 
-                        <div class="xd-observe-text">
+          <span>
+            节目组你最好有事
+          </span>
 
-                          <div>
-                            ${escapeHTML(item.text)}
-                          </div>
+          <span>
+            我已经开始期待了
+          </span>
 
-                          <div class="xd-observe-time">
-                            ${escapeHTML(
-                              item.time || "刚刚"
-                            )}
-                          </div>
-
-                        </div>
-
-                      </div>
-                    `
-                  )
-                  .join("")
-              : `
-                <div class="xd-empty">
-                  <div class="xd-empty-icon">
-                    ◌
-                  </div>
-
-                  <div class="xd-empty-title">
-                    观察室暂时安静
-                  </div>
-
-                  <div class="xd-empty-text">
-                    随着剧情推进，
-                    镜头之外也会逐渐留下记录。
-                  </div>
-                </div>
-              `
-          }
-
-        </section>
+        </div>
 
       </div>
     `;
   }
 
   /* =========================================================
-     嘉宾页面
-     =========================================================
-     重要：
-     这里保持原版页面。
-     唯一改变的是数据源：
-     currentArchive.characters
+     嘉宾页
      ========================================================= */
 
   function renderGuests() {
-    const chars = currentCharacters();
+
+    const chars =
+      state.characters || [];
+
+    if (!state.currentArchive) {
+
+      return `
+        <div class="xd-page">
+
+          ${pageHead(
+            "THE CAST",
+            "嘉宾档案",
+            "创建恋综后开启"
+          )}
+
+          <div class="xd-empty">
+
+            <div class="xd-empty-icon">
+              ♡
+            </div>
+
+            <div class="xd-empty-title">
+              还没有本季嘉宾
+            </div>
+
+            <div class="xd-empty-text">
+              Roche 中的角色只会作为候选嘉宾。
+              创建恋综并选择他们之后，
+              才会正式入住本季。
+            </div>
+
+            <div style="margin-top:14px;font-size:10px;color:#a97983;font-weight:700;">
+              请前往「档案」创建新的恋综世界
+            </div>
+
+          </div>
+
+        </div>
+      `;
+    }
 
     return `
       <div class="xd-page">
@@ -2618,7 +2823,7 @@
         ${pageHead(
           "THE CAST",
           "本季嘉宾",
-          `${chars.length} 位已加入`
+          `${chars.length} 位入住`
         )}
 
         <div class="xd-profile">
@@ -2628,26 +2833,21 @@
           <div>
 
             <div class="xd-profile-name">
-              ${escapeHTML(
-                realName(
-                  state.user,
-                  "我的人设"
-                )
-              )}
+              ${esc(nameOf(
+                state.user,
+                "我的人设"
+              ))}
             </div>
 
             <div class="xd-profile-handle">
-              ${
-                state.user?.handle
-                  ? "@" + escapeHTML(
-                      state.user.handle
-                    )
-                  : "USER"
-              }
+              ${esc(
+                handleOf(state.user) ||
+                "USER"
+              )}
             </div>
 
             <div class="xd-profile-bio">
-              ${escapeHTML(
+              ${esc(
                 state.user?.bio ||
                 "本季恋综玩家"
               )}
@@ -2664,7 +2864,7 @@
           </div>
 
           <div class="xd-section-note">
-            LOCKED PERSONA
+            ${chars.length} 条故事线
           </div>
 
         </div>
@@ -2673,54 +2873,41 @@
 
           ${
             chars.length
-              ? chars
-                  .map(
-                    (char) => `
-                      <div
-                        class="xd-guest-card"
-                        data-guest-id="${escapeHTML(
-                          char.characterId || char.id
-                        )}"
-                      >
 
-                        ${avatarHTML(char)}
+              ? chars.map((char) => `
+                <div
+                  class="xd-guest-card"
+                  data-guest-id="${esc(char.id)}"
+                >
 
-                        <div class="xd-guest-main">
+                  ${avatarHTML(char)}
 
-                          <div class="xd-guest-name">
-                            ${escapeHTML(
-                              realName(char)
-                            )}
-                          </div>
+                  <div class="xd-guest-main">
 
-                          <div class="xd-guest-handle">
-                            ${
-                              char.handle
-                                ? "@" +
-                                  escapeHTML(
-                                    char.handle
-                                  )
-                                : "嘉宾"
-                            }
-                          </div>
+                    <div class="xd-guest-name">
+                      ${esc(nameOf(char))}
+                    </div>
 
-                          <div class="xd-guest-bio">
-                            ${escapeHTML(
-                              char.bio ||
-                              "这个人没有留下简介。"
-                            )}
-                          </div>
+                    <div class="xd-guest-handle">
+                      ${esc(
+                        handleOf(char) ||
+                        "GUEST"
+                      )}
+                    </div>
 
-                        </div>
+                    <div class="xd-guest-bio">
+                      点击查看嘉宾档案
+                    </div>
 
-                        <div class="xd-arrow">
-                          ›
-                        </div>
+                  </div>
 
-                      </div>
-                    `
-                  )
-                  .join("")
+                  <div class="xd-arrow">
+                    ›
+                  </div>
+
+                </div>
+              `).join("")
+
               : `
                 <div class="xd-empty">
 
@@ -2729,17 +2916,662 @@
                   </div>
 
                   <div class="xd-empty-title">
-                    还没有嘉宾
+                    本季还没有嘉宾
                   </div>
 
                   <div class="xd-empty-text">
-                    创建恋综档案后，
-                    从 Roche 角色中选择你的入住嘉宾。
+                    请创建恋综时选择入住嘉宾。
                   </div>
 
                 </div>
               `
           }
+
+        </div>
+
+      </div>
+    `;
+  }
+
+  /* =========================================================
+     观察室
+     ========================================================= */
+
+  function renderObserve() {
+
+    const chars =
+      state.characters || [];
+
+    if (!state.currentArchive) {
+
+      return `
+        <div class="xd-page">
+
+          ${pageHead(
+            "OBSERVATION ROOM",
+            "节目观察室",
+            "还没有节目"
+          )}
+
+          <div class="xd-empty">
+
+            <div class="xd-empty-icon">
+              👀
+            </div>
+
+            <div class="xd-empty-title">
+              这里会发生什么？
+            </div>
+
+            <div class="xd-empty-text">
+              当你不在现场时，
+              其他嘉宾的行动、聊天与事件
+              会逐渐汇聚到这里。
+            </div>
+
+          </div>
+
+        </div>
+      `;
+    }
+
+    return `
+      <div class="xd-page">
+
+        ${pageHead(
+          "OBSERVATION ROOM",
+          "节目观察室",
+          "你不在的时候"
+        )}
+
+        <section class="xd-hero"
+          style="min-height:190px;">
+
+          <div class="xd-kicker">
+            OFF CAMERA
+          </div>
+
+          <div
+            class="xd-hero-title"
+            style="font-size:27px;"
+          >
+            有些故事，
+            你不会亲眼看到。
+          </div>
+
+          <div class="xd-hero-sub">
+            观察室记录你离开现场之后，
+            嘉宾之间发生的互动。
+            这里不是剧情主线，
+            而是这个世界自己继续运转留下的痕迹。
+          </div>
+
+        </section>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            今日观察
+          </div>
+
+          <div class="xd-section-note">
+            DAY
+            ${String(
+              state.currentArchive.currentDay || 1
+            ).padStart(2,"0")}
+          </div>
+
+        </div>
+
+        <div class="xd-observe-card">
+
+          <div class="xd-kicker">
+            HOUSE CAMERA
+          </div>
+
+          <div class="xd-observe-scene">
+
+            <div class="xd-observe-scene-title">
+              客厅
+            </div>
+
+            <div class="xd-observe-text">
+              节目组暂时没有记录到
+              可以公开的特殊事件。
+              随着剧情推进，
+              这里会逐渐出现更多
+              嘉宾自主行动留下的片段。
+            </div>
+
+          </div>
+
+          <div class="xd-observe-scene">
+
+            <div class="xd-observe-scene-title">
+              厨房
+            </div>
+
+            <div class="xd-observe-text">
+              有人比其他人更早开始准备晚餐。
+              至于是谁，
+              目前还没有人告诉你。
+            </div>
+
+          </div>
+
+        </div>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            本季嘉宾
+          </div>
+
+          <div class="xd-section-note">
+            ${chars.length} 人
+          </div>
+
+        </div>
+
+        <div class="xd-card-grid">
+
+          ${
+            chars.map((char) => `
+              <div class="xd-guest-card">
+
+                ${avatarHTML(char)}
+
+                <div class="xd-guest-main">
+
+                  <div class="xd-guest-name">
+                    ${esc(nameOf(char))}
+                  </div>
+
+                  <div class="xd-guest-bio">
+                    当前状态：节目进行中
+                  </div>
+
+                </div>
+
+              </div>
+            `).join("")
+          }
+
+        </div>
+
+      </div>
+    `;
+  }
+
+  /* =========================================================
+     嘉宾详情
+     ========================================================= */
+
+  function renderGuestDetail(char) {
+
+    const archive =
+      state.currentArchive;
+
+    const relation =
+      archive?.relationships
+        ?.userToChar?.[char.id] ||
+      {
+        statusLine:
+          "你们的故事才刚刚开始。",
+        tags:["尚未定义"]
+      };
+
+    const persona =
+      char.persona ||
+      char.bio ||
+      "暂无可展示的人设。";
+
+    const expanded =
+      state.detailExpanded
+        ? "open"
+        : "";
+
+    return `
+      <div class="xd-page">
+
+        <div class="xd-detail-hero">
+
+          ${avatarHTML(char)}
+
+          <div class="xd-detail-name">
+            ${esc(nameOf(char))}
+          </div>
+
+          <div class="xd-detail-handle">
+            ${esc(
+              handleOf(char) ||
+              "GUEST"
+            )}
+          </div>
+
+        </div>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            嘉宾档案
+          </div>
+
+          <div class="xd-section-note">
+            PERSONA
+          </div>
+
+        </div>
+
+        <div class="xd-collapse ${expanded}">
+
+          <button
+            class="xd-collapse-head"
+            data-toggle-persona
+          >
+
+            <span>
+              人设描述
+            </span>
+
+            <span>
+              ${state.detailExpanded ? "⌃" : "⌄"}
+            </span>
+
+          </button>
+
+          <div class="xd-collapse-body">
+            ${esc(persona)}
+          </div>
+
+        </div>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            你们的关系
+          </div>
+
+          <div class="xd-section-note">
+            RELATIONSHIP
+          </div>
+
+        </div>
+
+        <div class="xd-relation-box">
+
+          <div class="xd-relation-line">
+
+            <div>
+
+              <div
+                style="
+                  font-size:10px;
+                  color:#8e8183;
+                  margin-bottom:4px;
+                "
+              >
+                当前状态
+              </div>
+
+              <div class="xd-relation-state">
+                ${esc(
+                  relation.statusLine ||
+                  "尚未定义"
+                )}
+              </div>
+
+            </div>
+
+            <div
+              style="
+                font-size:28px;
+                opacity:.75;
+              "
+            >
+              ♡
+            </div>
+
+          </div>
+
+          <div class="xd-tags">
+
+            ${
+              (relation.tags?.length
+                ? relation.tags
+                : ["故事刚刚开始"]
+              )
+              .map(
+                tag => `
+                  <span class="xd-tag">
+                    ${esc(tag)}
+                  </span>
+                `
+              )
+              .join("")
+            }
+
+          </div>
+
+        </div>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            与他联系
+          </div>
+
+        </div>
+
+        <button
+          class="xd-primary"
+          style="
+            width:100%;
+            margin-top:0;
+          "
+          data-open-private
+        >
+          💬 打开私信
+        </button>
+
+      </div>
+    `;
+  }
+
+  /* =========================================================
+     私信
+     ========================================================= */
+
+  function renderPrivateChat(char) {
+
+    const archive =
+      state.currentArchive;
+
+    const messages =
+      archive?.privateMessages?.[char.id] ||
+      [
+        {
+          from:"char",
+          text:
+            "今晚……好像有很多话想和你说。"
+        }
+      ];
+
+    return `
+      <div class="xd-chat">
+
+        <div class="xd-chat-list">
+
+          <div class="xd-chat-person">
+
+            ${avatarHTML(char)}
+
+            <div>
+
+              <div
+                style="
+                  font-size:15px;
+                  font-weight:800;
+                "
+              >
+                ${esc(nameOf(char))}
+              </div>
+
+              <div
+                style="
+                  margin-top:3px;
+                  font-size:9px;
+                  color:#a97983;
+                "
+              >
+                PRIVATE MESSAGE
+              </div>
+
+            </div>
+
+          </div>
+
+          ${
+            messages.map((msg) => `
+              <div
+                class="
+                  xd-chat-message
+                  ${msg.from === "me" ? "me" : ""}
+                "
+              >
+
+                <div class="xd-chat-bubble">
+                  ${esc(msg.text)}
+                </div>
+
+              </div>
+            `).join("")
+          }
+
+        </div>
+
+        <div class="xd-chat-input">
+
+          <input
+            data-private-input
+            placeholder="写点什么……"
+          >
+
+          <button
+            class="xd-chat-send"
+            data-private-send
+          >
+            ↑
+          </button>
+
+        </div>
+
+      </div>
+    `;
+  }
+
+  /* =========================================================
+     心动小屋
+     ========================================================= */
+
+  function renderHouse() {
+
+    return `
+      <div class="xd-page">
+
+        ${pageHead(
+          "THE HOUSE",
+          "心动小屋",
+          "选择你想去的地方"
+        )}
+
+        <section class="xd-house">
+
+          <div class="xd-house-roof"></div>
+
+          <div class="xd-house-title">
+
+            <div class="xd-house-name">
+              心动小屋
+            </div>
+
+            <div class="xd-house-sub">
+              今晚 · ${esc(
+                state.currentArchive?.currentTime ||
+                "20:36"
+              )}
+            </div>
+
+          </div>
+
+          <button
+            class="xd-room xd-room-kitchen"
+            data-room="kitchen"
+          >
+
+            <div class="xd-room-icon">
+              🍳
+            </div>
+
+            <div class="xd-room-name">
+              厨房
+            </div>
+
+            <div class="xd-room-desc">
+              香味已经飘出来了
+            </div>
+
+          </button>
+
+          <button
+            class="xd-room xd-room-living"
+            data-room="living"
+          >
+
+            <div class="xd-room-icon">
+              🛋️
+            </div>
+
+            <div class="xd-room-name">
+              客厅
+            </div>
+
+            <div class="xd-room-desc">
+              最容易发生偶遇
+            </div>
+
+          </button>
+
+          <button
+            class="xd-room xd-room-bath"
+            data-room="bath"
+          >
+
+            <div class="xd-room-icon">
+              🫧
+            </div>
+
+            <div class="xd-room-name">
+              卫生间
+            </div>
+
+            <div class="xd-room-desc">
+              暂时安静的角落
+            </div>
+
+          </button>
+
+          <button
+            class="xd-room xd-room-bedroom"
+            data-room="bedroom"
+          >
+
+            <div class="xd-room-icon">
+              🛏️
+            </div>
+
+            <div class="xd-room-name">
+              卧室
+            </div>
+
+            <div class="xd-room-desc">
+              夜晚之后的私人空间
+            </div>
+
+          </button>
+
+          <button
+            class="xd-room xd-room-garden"
+            data-room="garden"
+          >
+
+            <div class="xd-room-icon">
+              🌿
+            </div>
+
+            <div class="xd-room-name">
+              花园
+            </div>
+
+            <div class="xd-room-desc">
+              最适合偷偷聊一会儿
+            </div>
+
+          </button>
+
+        </section>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            今日玩法
+          </div>
+
+          <div class="xd-section-note">
+            GAME & EVENT
+          </div>
+
+        </div>
+
+        <div class="xd-play-grid">
+
+          <button
+            class="xd-play-card"
+            data-play="kitchen"
+          >
+
+            <div class="xd-play-icon">
+              🍳
+            </div>
+
+            <div class="xd-play-title">
+              厨房大战
+            </div>
+
+            <div class="xd-play-desc">
+              谁负责做饭？
+              谁负责捣乱？
+            </div>
+
+          </button>
+
+          <button
+            class="xd-play-card"
+            data-play="message"
+          >
+
+            <div class="xd-play-icon">
+              💌
+            </div>
+
+            <div class="xd-play-title">
+              匿名短信夜
+            </div>
+
+            <div class="xd-play-desc">
+              今晚的短信来自谁？
+            </div>
+
+          </button>
+
+          <button
+            class="xd-play-card"
+            data-play="gift"
+          >
+
+            <div class="xd-play-icon">
+              🎁
+            </div>
+
+            <div class="xd-play-title">
+              心动礼物
+            </div>
+
+            <div class="xd-play-desc">
+              有人准备了一份礼物
+            </div>
+
+          </button>
 
         </div>
 
@@ -2752,925 +3584,125 @@
      ========================================================= */
 
   function renderPhone() {
-    return `
-      <div class="xd-page">
-
-        ${pageHead(
-          "MY PHONE",
-          "我的手机",
-          "PERSONAL DEVICE"
-        )}
-
-        <section class="xd-phone">
-
-          <div class="xd-phone-head">
-
-            <div class="xd-phone-title">
-              我的手机
-            </div>
-
-            <div class="xd-phone-time">
-              ${new Date().toLocaleTimeString(
-                "zh-CN",
-                {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                }
-              )}
-            </div>
-
-          </div>
-
-          <div class="xd-app-grid">
-
-            <button
-              class="xd-app"
-              data-phone-app="feed"
-            >
-              <div class="xd-app-icon">
-                ♡
-              </div>
-              <div class="xd-app-name">
-                动态
-              </div>
-            </button>
-
-            <button
-              class="xd-app"
-              data-phone-app="weibo"
-            >
-              <div class="xd-app-icon">
-                ◎
-              </div>
-              <div class="xd-app-name">
-                微博
-              </div>
-            </button>
-
-            <button
-              class="xd-app"
-              data-phone-app="messages"
-            >
-              <div class="xd-app-icon">
-                ✉
-              </div>
-              <div class="xd-app-name">
-                私信
-              </div>
-            </button>
-
-            <button
-              class="xd-app"
-              data-phone-app="notes"
-            >
-              <div class="xd-app-icon">
-                ▤
-              </div>
-              <div class="xd-app-name">
-                备忘录
-              </div>
-            </button>
-
-            <button
-              class="xd-app"
-              data-phone-app="notice"
-            >
-              <div class="xd-app-icon">
-                ♧
-              </div>
-              <div class="xd-app-name">
-                节目通知
-              </div>
-            </button>
-
-            <button
-              class="xd-app"
-              data-phone-app="world"
-            >
-              <div class="xd-app-icon">
-                ✦
-              </div>
-              <div class="xd-app-name">
-                世界书
-              </div>
-            </button>
-
-          </div>
-
-        </section>
-
-      </div>
-    `;
-  }
-
-  function renderPhoneSubpage() {
-    const view = state.currentPhoneView;
-
-    if (view === "feed") {
-      return renderPhoneFeed();
-    }
-
-    if (view === "weibo") {
-      return renderWeibo();
-    }
-
-    if (view === "messages") {
-      return renderPhoneMessages();
-    }
-
-    if (view === "notes") {
-      return renderPhoneNotes();
-    }
-
-    if (view === "notice") {
-      return renderPhoneNotice();
-    }
-
-    if (view === "world") {
-      return renderPhoneWorld();
-    }
-
-    return renderPhone();
-  }
-
-  /* =========================================================
-     动态
-     ========================================================= */
-
-  function renderPhoneFeed() {
     const archive = state.currentArchive;
+    const title = archive?.title || "尚未开始恋综";
+    const day = archive?.currentDay || 1;
+    const smsCount = archive?.phone?.sms?.length || 0;
+    const weiboCount = archive?.phone?.weibo?.length || 0;
 
-    const posts =
-      archive?.phone?.feed || [
-        {
-          author: "节目组",
-          role: "PRODUCER",
-          text: "今天的拍摄比想象中顺利。希望大家晚上都能放松一点。",
-          time: "今天 18:20",
-        },
-        {
-          author:
-            currentCharacters()[0]?.name ||
-            "某位嘉宾",
-          role: "GUEST",
-          text: "今天好像发生了很多事情。",
-          time: "今天 19:04",
-        },
-      ];
+    if (!archive) {
+      return `<div class="xd-page">${pageHead("MY PHONE","我的手机","等待一季恋综开始")}<div class="xd-empty"><div class="xd-empty-icon">▣</div><div class="xd-empty-title">你的手机还没有故事</div><div class="xd-empty-text">开始一个恋综档案后，微博、短信、备忘录等数据会跟着这一季独立变化。</div></div></div>`;
+    }
 
     return `
       <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "PERSONAL FEED",
-          "动态",
-          "与你有关的人"
-        )}
-
-        <div
-          style="
-            margin-bottom:12px;
-            color:#8e8183;
-            font-size:10px;
-            line-height:1.6;
-          "
-        >
-          这里只显示与你和本季节目直接有关的人。
-          陌生网友不会出现在这里。
-        </div>
-
-        <div class="xd-feed">
-
-          ${posts
-            .map(
-              (post) => `
-                <article class="xd-feed-card">
-
-                  <div class="xd-feed-top">
-
-                    <div class="xd-feed-avatar">
-                      ${
-                        post.avatar
-                          ? `
-                            <img
-                              src="${escapeHTML(
-                                post.avatar
-                              )}"
-                              alt=""
-                            >
-                          `
-                          : "♡"
-                      }
-                    </div>
-
-                    <div>
-
-                      <div class="xd-feed-author">
-                        ${escapeHTML(
-                          post.author
-                        )}
-                      </div>
-
-                      <div class="xd-feed-role">
-                        ${escapeHTML(
-                          post.role || "节目相关"
-                        )}
-                      </div>
-
-                    </div>
-
-                  </div>
-
-                  <div class="xd-feed-body">
-                    ${escapeHTML(post.text)}
-                  </div>
-
-                  <div class="xd-feed-time">
-                    ${escapeHTML(
-                      post.time || "刚刚"
-                    )}
-                  </div>
-
-                </article>
-              `
-            )
-            .join("")}
-
-        </div>
-
-      </div>
-    `;
+        ${pageHead("MY PHONE","我的手机",`DAY ${String(day).padStart(2,"0")}`)}
+        <section class="xd-phone">
+          <div class="xd-phone-status"><span>9:41</span><span>● ● ▰</span></div>
+          <div class="xd-phone-title">我的手机</div>
+          <div class="xd-phone-sub">${esc(title)} · 这一季的生活都在这里</div>
+          <div class="xd-phone-apps">
+            <button class="xd-phone-app" data-phone-app="weibo"><div class="xd-phone-icon">◉</div><div class="xd-phone-label">微博</div></button>
+            <button class="xd-phone-app" data-phone-app="sms"><div class="xd-phone-icon">✉</div><div class="xd-phone-label">短信 <span style="color:#a97983;">${smsCount || ""}</span></div></button>
+            <button class="xd-phone-app" data-phone-app="notes"><div class="xd-phone-icon">▤</div><div class="xd-phone-label">备忘录</div></button>
+            <button class="xd-phone-app" data-phone-app="album"><div class="xd-phone-icon">▧</div><div class="xd-phone-label">相册</div></button>
+          </div>
+          <div class="xd-phone-widget">
+            <div class="xd-kicker">TODAY ON YOUR PHONE</div>
+            <div style="margin-top:7px;font-size:13px;font-weight:800;">${weiboCount} 条微博动态 · ${smsCount} 条短信</div>
+            <div style="margin-top:5px;font-size:10px;line-height:1.6;color:#8e8183;">外面的世界正在讨论这档节目，而你手机里的内容也会随着剧情慢慢变化。</div>
+          </div>
+        </section>
+      </div>`;
   }
 
-  /* =========================================================
-     微博
-     ========================================================= */
+  function renderPhoneSub(title, kicker, body) {
+    return `<div class="xd-page"><div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;"><button class="xd-small-btn" data-back-phone style="flex:0 0 auto;width:72px;">‹ 返回</button><div style="font-size:19px;font-weight:820;">${esc(title)}</div></div><div class="xd-kicker">${esc(kicker)}</div>${body}</div>`;
+  }
 
   function renderWeibo() {
-    const archive = state.currentArchive;
-
-    const category =
-      archive?.phone?.weiboCategory ||
-      "all";
-
-    const posts =
-      archive?.phone?.weibo || [
-        {
-          category: "gossip",
-          author: "吃瓜群众A",
-          text: "今晚这个恋综是不是有点东西？感觉某两个人之间真的很微妙。",
-          time: "今天 19:22",
-        },
-        {
-          category: "report",
-          author: "娱乐现场",
-          text: "《心动现场》今晚最新路透：嘉宾阵容逐渐公开。",
-          time: "今天 18:45",
-        },
-        {
-          category: "fan",
-          author: "心动同人站",
-          text: "如果他们真的在一起，我先写为敬。",
-          time: "今天 17:18",
-        },
-      ];
-
-    const filtered =
-      category === "all"
-        ? posts
-        : posts.filter(
-            (post) =>
-              post.category === category
-          );
-
-    const labels = [
-      ["all", "全部"],
-      ["gossip", "吃瓜"],
-      ["report", "报道"],
-      ["fan", "同人"],
-    ];
-
-    return `
-      <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "PUBLIC INTERNET",
-          "微博",
-          "外部世界"
-        )}
-
-        <div class="xd-weibo-tabs">
-
-          ${labels
-            .map(
-              ([id, label]) => `
-                <button
-                  class="xd-weibo-tab ${
-                    category === id
-                      ? "active"
-                      : ""
-                  }"
-                  data-weibo-category="${id}"
-                >
-                  ${label}
-                </button>
-              `
-            )
-            .join("")}
-
-        </div>
-
-        <div
-          class="xd-feed"
-          style="margin-top:11px;"
-        >
-
-          ${
-            filtered.length
-              ? filtered
-                  .map(
-                    (post) => `
-                      <article class="xd-feed-card">
-
-                        <div class="xd-feed-top">
-
-                          <div class="xd-feed-avatar">
-                            ◎
-                          </div>
-
-                          <div>
-
-                            <div class="xd-feed-author">
-                              ${escapeHTML(
-                                post.author
-                              )}
-                            </div>
-
-                            <div class="xd-feed-role">
-                              PUBLIC
-                            </div>
-
-                          </div>
-
-                        </div>
-
-                        <div class="xd-feed-body">
-                          ${escapeHTML(
-                            post.text
-                          )}
-                        </div>
-
-                        <div class="xd-feed-time">
-                          ${escapeHTML(
-                            post.time ||
-                            "刚刚"
-                          )}
-                        </div>
-
-                      </article>
-                    `
-                  )
-                  .join("")
-              : `
-                <div class="xd-empty">
-                  <div class="xd-empty-icon">
-                    ◎
-                  </div>
-
-                  <div class="xd-empty-title">
-                    这个分类还没有消息
-                  </div>
-
-                  <div class="xd-empty-text">
-                    随着节目推进，
-                    外部舆论会慢慢产生变化。
-                  </div>
-                </div>
-              `
-          }
-
-        </div>
-
-      </div>
-    `;
+    const items = state.currentArchive?.phone?.weibo || [];
+    const chars = state.characters || [];
+    return renderPhoneSub("微博", "PUBLIC FEED", `
+      <div class="xd-section-head"><div class="xd-section-title">关于《${esc(state.currentArchive?.title || "心动现场")}》</div><div class="xd-section-note">吃瓜 / 报道 / 同人</div></div>
+      <div class="xd-phone-list">
+        ${items.map((item, i) => `<article class="xd-phone-widget"><div class="xd-feed-head"><div class="xd-feed-avatar">${i === 0 ? "官" : "瓜"}</div><div><div class="xd-feed-name">${esc(item.author)}</div><div class="xd-feed-time">${esc(item.time)}</div></div></div><div class="xd-feed-text">${esc(item.text)}</div><div class="xd-feed-meta">${esc(item.meta || "热议中")}</div></article>`).join("")}
+        <article class="xd-phone-widget"><div class="xd-kicker">HOT SEARCH</div><div style="margin-top:8px;font-size:12px;font-weight:800;">#${esc(chars[0]?.name || "本季嘉宾")} 在节目里到底什么关系？</div><div style="margin-top:6px;font-size:10px;color:#8e8183;line-height:1.6;">网友正在根据节目片段、弹幕与匿名投稿进行各种猜测。</div></article>
+      </div>`);
   }
 
-  /* =========================================================
-     私信
-     ========================================================= */
-
-  function renderPhoneMessages() {
-    const messages =
-      state.currentArchive?.privateMessages || {};
-
-    const chars = currentCharacters();
-
-    return `
-      <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "PRIVATE MESSAGES",
-          "私信",
-          "本季节目"
-        )}
-
-        <div class="xd-card-grid">
-
-          ${
-            chars.length
-              ? chars
-                  .map(
-                    (char) => {
-                      const id =
-                        char.characterId ||
-                        char.id;
-
-                      const list =
-                        messages[id] || [];
-
-                      const last =
-                        list[list.length - 1];
-
-                      return `
-                        <article
-                          class="xd-guest-card"
-                          data-chat-character="${escapeHTML(id)}"
-                        >
-
-                          ${avatarHTML(char)}
-
-                          <div class="xd-guest-main">
-
-                            <div class="xd-guest-name">
-                              ${escapeHTML(
-                                realName(char)
-                              )}
-                            </div>
-
-                            <div class="xd-guest-bio">
-                              ${
-                                last?.text
-                                  ? escapeHTML(
-                                      last.text
-                                    )
-                                  : "还没有聊天记录"
-                              }
-                            </div>
-
-                          </div>
-
-                          <div class="xd-arrow">
-                            ›
-                          </div>
-
-                        </article>
-                      `;
-                    }
-                  )
-                  .join("")
-              : `
-                <div class="xd-empty">
-                  <div class="xd-empty-icon">
-                    ✉
-                  </div>
-
-                  <div class="xd-empty-title">
-                    还没有私信
-                  </div>
-
-                  <div class="xd-empty-text">
-                    当角色主动联系你后，
-                    对话会出现在这里。
-                  </div>
-                </div>
-              `
-          }
-
-        </div>
-
-      </div>
-    `;
-  }
-
-  function openPrivateChat(char) {
-    const id =
-      char.characterId ||
-      char.id;
-
-    const list =
-      state.currentArchive?.privateMessages?.[id] ||
-      [];
-
-    const modal =
-      document.createElement("div");
-
-    modal.className = "xd-modal-wrap";
-
-    modal.innerHTML = `
-      <section
-        class="xd-modal"
-        style="
-          height:88%;
-          max-height:88%;
-        "
-      >
-
-        <div class="xd-modal-handle"></div>
-
-        <div
-          style="
-            display:flex;
-            align-items:center;
-            gap:10px;
-          "
-        >
-
-          ${avatarHTML(char)}
-
-          <div>
-
-            <div class="xd-modal-title">
-              ${escapeHTML(
-                realName(char)
-              )}
-            </div>
-
-            <div
-              style="
-                margin-top:3px;
-                color:#a97983;
-                font-size:9px;
-              "
-            >
-              PRIVATE MESSAGE
-            </div>
-
-          </div>
-
-        </div>
-
-        <div
-          style="
-            margin-top:17px;
-            min-height:230px;
-            padding:5px;
-            border-radius:17px;
-            background:#f6eeee;
-          "
-        >
-
-          ${
-            list.length
-              ? list
-                  .map(
-                    (message) => `
-                      <div
-                        style="
-                          margin:8px;
-                          padding:10px 12px;
-                          border-radius:15px;
-                          background:white;
-                          font-size:11px;
-                          line-height:1.7;
-                          color:#65575a;
-                        "
-                      >
-                        ${escapeHTML(
-                          message.text
-                        )}
-                      </div>
-                    `
-                  )
-                  .join("")
-              : `
-                <div
-                  style="
-                    padding:45px 20px;
-                    text-align:center;
-                    color:#a09295;
-                    font-size:10px;
-                  "
-                >
-                  你们还没有开始聊天。
-                </div>
-              `
-          }
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            回复
-          </label>
-
-          <textarea
-            data-chat-input
-            placeholder="输入消息……"
-          ></textarea>
-
-        </div>
-
-        <div class="xd-modal-actions">
-
-          <button
-            class="xd-small-btn"
-            data-chat-close
-          >
-            关闭
-          </button>
-
-          <button
-            class="xd-primary"
-            style="margin-top:0;"
-            data-chat-send
-          >
-            发送
-          </button>
-
-        </div>
-
-      </section>
-    `;
-
-    state.container
-      .querySelector(
-        ".roche-plugin-xindong-xianchang"
-      )
-      .appendChild(modal);
-
-    modal
-      .querySelector("[data-chat-close]")
-      .addEventListener(
-        "click",
-        () => modal.remove()
-      );
-
-    modal
-      .querySelector("[data-chat-send]")
-      .addEventListener(
-        "click",
-        async () => {
-
-          const input =
-            modal.querySelector(
-              "[data-chat-input]"
-            );
-
-          const text =
-            input.value.trim();
-
-          if (!text) return;
-
-          if (
-            !state.currentArchive.privateMessages
-          ) {
-            state.currentArchive.privateMessages = {};
-          }
-
-          if (
-            !state.currentArchive.privateMessages[id]
-          ) {
-            state.currentArchive.privateMessages[id] = [];
-          }
-
-          state.currentArchive
-            .privateMessages[id]
-            .push({
-              from: "user",
-              text,
-              createdAt: Date.now(),
-            });
-
-          await saveCurrentArchive();
-
-          input.value = "";
-
-          modal.remove();
-
-          renderPage();
-
-          toast("消息已发送");
-        }
-      );
+  function renderPhoneSMS() {
+    const items = state.currentArchive?.phone?.sms || [];
+    return renderPhoneSub("短信", "MESSAGES", `
+      <div class="xd-phone-list" style="margin-top:14px;">
+        ${items.map(item => `<article class="xd-phone-list-card"><div style="display:flex;justify-content:space-between;gap:10px;"><div class="xd-phone-list-title">${esc(item.from)}</div><div style="font-size:8px;color:#a09597;">${esc(item.time)}</div></div><div class="xd-phone-list-desc">${esc(item.text)}</div></article>`).join("")}
+        <article class="xd-phone-list-card"><div class="xd-phone-list-title">匿名短信</div><div class="xd-phone-list-desc">节目中的匿名短信会在这里留下记录。谁发来的，暂时只有剧情知道。</div></article>
+      </div>`);
   }
 
   function renderPhoneNotes() {
-    const notes =
-      state.currentArchive?.phone?.notes || [];
-
-    return `
-      <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "NOTES",
-          "备忘录",
-          "我的记录"
-        )}
-
-        ${
-          notes.length
-            ? `
-              <div class="xd-feed">
-                ${notes
-                  .map(
-                    (note) => `
-                      <article class="xd-feed-card">
-                        <div class="xd-feed-body">
-                          ${escapeHTML(
-                            note.text
-                          )}
-                        </div>
-
-                        <div class="xd-feed-time">
-                          ${escapeHTML(
-                            note.time ||
-                            "刚刚"
-                          )}
-                        </div>
-                      </article>
-                    `
-                  )
-                  .join("")}
-              </div>
-            `
-            : `
-              <div class="xd-empty">
-                <div class="xd-empty-icon">
-                  ▤
-                </div>
-
-                <div class="xd-empty-title">
-                  还没有备忘
-                </div>
-
-                <div class="xd-empty-text">
-                  可以把恋综里的重要事情记下来。
-                </div>
-              </div>
-            `
-        }
-
-      </div>
-    `;
+    const items = state.currentArchive?.phone?.notes || [];
+    return renderPhoneSub("备忘录", "MY NOTES", `
+      <div class="xd-phone-list" style="margin-top:14px;">
+        ${items.map(item => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(item.title)}</div><div class="xd-phone-list-desc">${esc(item.text)}</div><div style="margin-top:6px;font-size:8px;color:#a09597;">${esc(item.time)}</div></article>`).join("")}
+      </div>`);
   }
 
-  function renderPhoneNotice() {
-    return `
-      <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "PROGRAM",
-          "节目通知",
-          "制作组"
-        )}
-
-        <div class="xd-feed">
-
-          <article class="xd-feed-card">
-
-            <div class="xd-feed-author">
-              《心动现场》节目组
-            </div>
-
-            <div class="xd-feed-body">
-              欢迎进入本季节目。
-              后续的重要节目安排、
-              临时任务与特别通知都会在这里出现。
-            </div>
-
-            <div class="xd-feed-time">
-              本季开机
-            </div>
-
-          </article>
-
-        </div>
-
-      </div>
-    `;
-  }
-
-  function renderPhoneWorld() {
-    const selected =
-      state.currentArchive?.worldbook
-        ?.selectedBookIds || [];
-
-    const books =
-      state.worldbooks.filter(
-        (book) =>
-          selected.includes(
-            book.id ||
-            book.worldbookId
-          )
-      );
-
-    return `
-      <div class="xd-page">
-
-        <button
-          class="xd-small-btn"
-          style="width:auto;"
-          data-phone-home
-        >
-          ← 我的手机
-        </button>
-
-        ${pageHead(
-          "WORLD",
-          "本季世界书",
-          `${books.length} 本`
-        )}
-
-        ${
-          books.length
-            ? books
-                .map(
-                  (book) => `
-                    <div class="xd-library-card">
-
-                      <div class="xd-library-title">
-                        ${escapeHTML(
-                          book.name ||
-                          book.title ||
-                          "未命名世界书"
-                        )}
-                      </div>
-
-                      <div class="xd-library-meta">
-                        已加入本季世界
-                      </div>
-
-                    </div>
-                  `
-                )
-                .join("")
-            : `
-              <div class="xd-empty">
-                <div class="xd-empty-icon">
-                  ✦
-                </div>
-
-                <div class="xd-empty-title">
-                  本季没有选择世界书
-                </div>
-
-                <div class="xd-empty-text">
-                  创建档案时可以选择已有世界书。
-                </div>
-              </div>
-            `
-        }
-
-      </div>
-    `;
+  function renderPhoneAlbum() {
+    const chars = state.characters || [];
+    return renderPhoneSub("相册", "MY ALBUM", `
+      <div class="xd-section-head"><div class="xd-section-title">本季瞬间</div><div class="xd-section-note">${chars.length} 位嘉宾</div></div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+        ${chars.map((char,i) => `<div style="aspect-ratio:1;border-radius:17px;overflow:hidden;background:#eadbde;display:grid;place-items:center;color:#855d67;font-weight:800;">${avatarOf(char) ? `<img src="${esc(avatarOf(char))}" style="width:100%;height:100%;object-fit:cover;">` : esc(nameOf(char).slice(0,1))}</div>`).join("")}
+        <div style="aspect-ratio:1;border-radius:17px;background:#f1e2e4;display:grid;place-items:center;color:#a97983;font-size:22px;">＋</div>
+      </div>`);
   }
 
   /* =========================================================
-     档案页面
+     世界书库
+     ========================================================= */
+
+  function renderWorldbooks() {
+    const all = [...state.rocheWorldbooks, ...state.customWorldbooks];
+    return `
+      <div class="xd-page">
+        ${pageHead("WORLDBOOK LIBRARY","世界书库","先准备世界，再开始恋综")}
+        <div class="xd-empty" style="padding:20px 16px;margin-bottom:11px;">
+          <div class="xd-empty-icon">📖</div>
+          <div class="xd-empty-title">世界书先于恋综存在</div>
+          <div class="xd-empty-text">这里可以管理 Roche 读取到的世界书，也可以提前写好多本自己的世界书。创建恋综时再自由勾选。</div>
+        </div>
+        <div class="xd-card-grid">
+          ${all.length ? all.map(wb => `<article class="xd-worldbook-card"><div class="xd-worldbook-type">${esc(wb.sourceLabel || "世界书")}</div><div class="xd-worldbook-name">${esc(wb.name)}</div><div class="xd-worldbook-desc">${esc(wb.description || "暂无说明")}</div><div class="xd-worldbook-content">${esc(wb.content || "暂无内容")}</div><div class="xd-worldbook-actions">${wb.builtin || wb.source === "roche" ? "" : `<button class="xd-small-btn" data-delete-worldbook="${esc(wb.id)}">删除</button>`}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有世界书</div></div>`}
+        </div>
+        <button class="xd-new-archive" data-new-worldbook>＋ 提前创建一本世界书</button>
+      </div>`;
+  }
+
+  function openCreateWorldbook() {
+    const modal = document.createElement("div");
+    modal.className = "xd-modal-wrap";
+    modal.innerHTML = `<section class="xd-modal"><div class="xd-modal-handle"></div><div class="xd-kicker">NEW WORLDBOOK</div><div class="xd-modal-title" style="margin-top:4px;">创建世界书</div><div class="xd-field"><label>世界书名称</label><input data-wb-name maxlength="40" placeholder="例如：海岛恋综规则"></div><div class="xd-field"><label>简介</label><input data-wb-desc maxlength="100" placeholder="这本世界书负责什么"></div><div class="xd-field"><label>世界书内容</label><textarea data-wb-content rows="9" placeholder="写下世界观、节目规则、地点、人物规则、特殊事件……"></textarea></div><div class="xd-modal-actions"><button class="xd-small-btn" data-close-wb>取消</button><button class="xd-primary" style="margin-top:0;" data-save-wb>保存世界书</button></div></section>`;
+    state.container.querySelector(".roche-plugin-xindong-xianchang").appendChild(modal);
+    listen(modal.querySelector("[data-close-wb]"),"click",()=>modal.remove());
+    listen(modal,"click",e=>{if(e.target===modal)modal.remove();});
+    listen(modal.querySelector("[data-save-wb]"),"click",async()=>{
+      const name=modal.querySelector("[data-wb-name]").value.trim()||"未命名世界书";
+      const description=modal.querySelector("[data-wb-desc]").value.trim();
+      const content=modal.querySelector("[data-wb-content]").value.trim();
+      if(!content){toast("请先写一点世界书内容");return;}
+      state.customWorldbooks.push({id:uid(),name,description,content,source:"custom",sourceLabel:"自建世界书",defaultSelected:false,builtin:false,createdAt:Date.now()});
+      await storageSet("customWorldbooks",state.customWorldbooks);
+      modal.remove(); renderPage(); toast("世界书已保存");
+    });
+  }
+
+  /* =========================================================
+     档案
      ========================================================= */
 
   function renderArchives() {
+
     return `
       <div class="xd-page">
 
@@ -3680,7 +3712,10 @@
           `${state.archives.length} 个世界`
         )}
 
-        <div class="xd-empty"
+        <button class="xd-new-archive" data-open-worldbooks style="margin-top:0;margin-bottom:11px;">📖 世界书库 · 提前准备你的世界</button>
+
+        <div
+          class="xd-empty"
           style="
             padding:27px 18px;
             margin-bottom:11px;
@@ -3697,7 +3732,7 @@
 
           <div class="xd-empty-text">
             不同恋综之间的人设、剧情、
-            关系、世界书与手机数据彼此独立。
+            关系与记忆彼此独立。
           </div>
 
         </div>
@@ -3706,80 +3741,75 @@
 
           ${
             state.archives.length
-              ? state.archives
-                  .map(
-                    (archive) => `
-                      <article class="xd-archive">
 
-                        <div class="xd-archive-title">
-                          ${escapeHTML(
-                            archive.title
-                          )}
-                        </div>
+              ? state.archives.map(
+                  archive => `
+                    <article
+                      class="xd-archive"
+                    >
 
-                        <div class="xd-archive-meta">
-                          DAY
-                          ${String(
-                            archive.currentDay ||
-                            1
-                          ).padStart(2, "0")}
-                          ·
-                          ${
-                            (
-                              archive.characterNames ||
-                              []
-                            ).length
-                          } 位嘉宾
-                        </div>
+                      <div
+                        class="xd-archive-title"
+                      >
+                        ${esc(
+                          archive.title
+                        )}
+                      </div>
 
-                        <div
-                          style="
-                            margin-top:13px;
-                            font-size:10px;
-                            color:#8e8183;
-                          "
+                      <div
+                        class="xd-archive-meta"
+                      >
+                        DAY
+                        ${String(
+                          archive.currentDay || 1
+                        ).padStart(2,"0")}
+                        ·
+                        ${(archive.characterNames || []).length}
+                        位嘉宾
+                      </div>
+
+                      <div
+                        class="xd-archive-summary"
+                      >
+                        ${esc(
+                          archive.lastSummary ||
+                          "还没有发生故事。"
+                        )}
+                      </div>
+
+                      <div
+                        class="xd-archive-actions"
+                      >
+
+                        <button
+                          class="xd-small-btn"
+                          data-open-archive="${esc(
+                            archive.archiveId
+                          )}"
                         >
-                          ${
-                            archive.userName
-                              ? `参与者：${escapeHTML(
-                                  archive.userName
-                                )}`
-                              : ""
-                          }
-                        </div>
+                          进入档案
+                        </button>
 
-                        <div class="xd-archive-actions">
+                        <button
+                          class="xd-small-btn"
+                          data-delete-archive="${esc(
+                            archive.archiveId
+                          )}"
+                        >
+                          删除
+                        </button>
 
-                          <button
-                            class="xd-small-btn"
-                            data-open-archive="${escapeHTML(
-                              archive.archiveId
-                            )}"
-                          >
-                            进入档案
-                          </button>
+                      </div>
 
-                          <button
-                            class="xd-small-btn"
-                            data-delete-archive="${escapeHTML(
-                              archive.archiveId
-                            )}"
-                          >
-                            删除
-                          </button>
+                    </article>
+                  `
+                ).join("")
 
-                        </div>
-
-                      </article>
-                    `
-                  )
-                  .join("")
               : ""
           }
 
         </div>
 
-        <!-- 档案页面保留创建入口 -->
         <button
           class="xd-new-archive"
           data-new-archive
@@ -3787,14 +3817,118 @@
           ＋ 创建新的恋综世界
         </button>
 
-        <div style="margin-top:12px;">
+      </div>
+    `;
+  }
 
-          <button
-            class="xd-new-archive"
-            data-world-library
-          >
-            ✦ 世界书库
-          </button>
+  /* =========================================================
+     设置页面
+     ========================================================= */
+
+  function renderSettings() {
+
+    const archive =
+      state.currentArchive;
+
+    const mode =
+      archive?.participationMode ||
+      "immersive";
+
+    return `
+      <div class="xd-page">
+
+        ${pageHead(
+          "SHOW SETTINGS",
+          "恋综设置",
+          "决定你如何进入这个世界"
+        )}
+
+        <div class="xd-setting-card">
+
+          <div class="xd-setting-row">
+
+            <div>
+
+              <div class="xd-setting-name">
+                沉浸式参与
+              </div>
+
+              <div class="xd-setting-desc">
+                只读取当前 USER / 嘉宾的人设。
+                不主动融合你们过去的关系记忆。
+              </div>
+
+            </div>
+
+            <button
+              class="
+                xd-switch
+                ${mode === "immersive" ? "on" : ""}
+              "
+              data-mode="immersive"
+            ></button>
+
+          </div>
+
+          <div class="xd-setting-row">
+
+            <div>
+
+              <div class="xd-setting-name">
+                记忆融合
+              </div>
+
+              <div class="xd-setting-desc">
+                在人设基础上，
+                让角色过去与你的关系记忆
+                影响本季恋综。
+              </div>
+
+            </div>
+
+            <button
+              class="
+                xd-switch
+                ${mode === "memory" ? "on" : ""}
+              "
+              data-mode="memory"
+            ></button>
+
+          </div>
+
+        </div>
+
+        <div class="xd-section-head">
+
+          <div class="xd-section-title">
+            当前档案
+          </div>
+
+        </div>
+
+        <div class="xd-profile">
+
+          ${avatarHTML(state.user)}
+
+          <div>
+
+            <div class="xd-profile-name">
+              ${esc(
+                archive?.userPersona?.name ||
+                nameOf(state.user)
+              )}
+            </div>
+
+            <div class="xd-profile-handle">
+              ${esc(
+                archive?.userPersona?.handle
+                  ? "@" +
+                    archive.userPersona.handle
+                  : "USER"
+              )}
+            </div>
+
+          </div>
 
         </div>
 
@@ -3803,21 +3937,920 @@
   }
 
   /* =========================================================
+     页面渲染
+     ========================================================= */
+
+  function renderPage() {
+
+    const content =
+      state.container.querySelector(
+        "[data-content]"
+      );
+
+    if (!content) return;
+
+    clearListeners();
+
+    /*
+     * clearListeners 会把 shell 的监听器也清掉，
+     * 所以重新建立 shell 级监听。
+     */
+
+    bindShellEvents();
+
+    let html = "";
+
+    if (state.page === "guest") {
+
+      const char =
+        state.detailCharacter;
+
+      html = char
+        ? renderGuestDetail(char)
+        : renderGuests();
+
+    } else if (state.page === "phone-weibo") {
+
+      html = renderWeibo();
+
+    } else if (state.page === "phone-sms") {
+
+      html = renderPhoneSMS();
+
+    } else if (state.page === "phone-notes") {
+
+      html = renderPhoneNotes();
+
+    } else if (state.page === "phone-album") {
+
+      html = renderPhoneAlbum();
+
+    } else if (state.page === "worldbooks") {
+
+      html = renderWorldbooks();
+
+    } else if (state.page === "observe") {
+
+      html = renderObserve();
+
+    } else if (state.page === "chat") {
+
+      html = state.chatCharacter
+        ? renderPrivateChat(
+            state.chatCharacter
+          )
+        : renderGuests();
+
+    } else if (state.page === "house") {
+
+      html = renderHouse();
+
+    } else if (state.page === "settings") {
+
+      html = renderSettings();
+
+    } else {
+
+      html =
+        state.activeTab === "show"
+          ? renderShow()
+          : state.activeTab === "guests"
+          ? renderGuests()
+          : state.activeTab === "phone"
+          ? renderPhone()
+          : renderArchives();
+
+    }
+
+    content.innerHTML = html;
+
+    bindPageEvents();
+
+    updateTopDay();
+
+    updateTabs();
+  }
+
+  function bindShellEvents() {
+
+    const shell =
+      state.container.querySelector(
+        ".roche-plugin-xindong-xianchang"
+      );
+
+    if (!shell) return;
+
+    shell
+      .querySelectorAll("[data-tab]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          () => {
+
+            state.activeTab =
+              button.dataset.tab;
+
+            state.page = "tab";
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    listen(
+      shell.querySelector("[data-action='back']"),
+      "click",
+      () => {
+
+        if (state.page !== "tab") {
+
+          state.page = "tab";
+
+          state.stack = [];
+
+          renderPage();
+
+          return;
+        }
+
+        try {
+          state.roche.ui.closeApp();
+        } catch {
+          toast("无法返回 Roche");
+        }
+
+      }
+    );
+
+    listen(
+      shell.querySelector(
+        "[data-action='settings']"
+      ),
+      "click",
+      () => {
+
+        if (!state.currentArchive) {
+
+          toast(
+            "请先创建一个恋综档案"
+          );
+
+          return;
+        }
+
+        state.page = "settings";
+
+        renderPage();
+
+      }
+    );
+  }
+
+  function bindPageEvents() {
+
+    const root =
+      state.container;
+
+    /* 新建 */
+
+    root
+      .querySelectorAll("[data-new-archive]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          openCreateArchive
+        );
+
+      });
+
+    /* 嘉宾 */
+
+    root
+      .querySelectorAll("[data-guest-id]")
+      .forEach(card => {
+
+        listen(
+          card,
+          "click",
+          () => {
+
+            const char =
+              state.characters.find(
+                c =>
+                  String(c.id) ===
+                  String(
+                    card.dataset.guestId
+                  )
+              );
+
+            if (!char) return;
+
+            state.detailCharacter =
+              char;
+
+            state.detailExpanded = false;
+
+            state.page = "guest";
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    /* 人设展开 */
+
+    listen(
+      root.querySelector(
+        "[data-toggle-persona]"
+      ),
+      "click",
+      () => {
+
+        state.detailExpanded =
+          !state.detailExpanded;
+
+        renderPage();
+
+      }
+    );
+
+    /* 私信 */
+
+    listen(
+      root.querySelector(
+        "[data-open-private]"
+      ),
+      "click",
+      () => {
+
+        if (!state.detailCharacter)
+          return;
+
+        state.chatCharacter =
+          state.detailCharacter;
+
+        state.page = "chat";
+
+        renderPage();
+
+      }
+    );
+
+    /* 私信发送 */
+
+    listen(
+      root.querySelector(
+        "[data-private-send]"
+      ),
+      "click",
+      async () => {
+
+        const input =
+          root.querySelector(
+            "[data-private-input]"
+          );
+
+        const text =
+          input?.value.trim();
+
+        if (!text) return;
+
+        const char =
+          state.chatCharacter;
+
+        if (!char) return;
+
+        if (!state.currentArchive)
+          return;
+
+        if (!state.currentArchive.privateMessages)
+          state.currentArchive.privateMessages = {};
+
+        if (!state.currentArchive.privateMessages[char.id])
+          state.currentArchive.privateMessages[char.id] = [];
+
+        state.currentArchive
+          .privateMessages[char.id]
+          .push({
+            from:"me",
+            text,
+            createdAt:Date.now()
+          });
+
+        await saveCurrentArchive();
+
+        renderPage();
+
+      }
+    );
+
+    /* 观察室 */
+
+    root
+      .querySelectorAll("[data-open-observe]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          () => {
+
+            state.activeTab =
+              "observe";
+
+            state.page =
+              "tab";
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    /* 房屋 */
+
+    root
+      .querySelectorAll("[data-open-house]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          () => {
+
+            state.page =
+              "house";
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    /* 房间 */
+
+    root
+      .querySelectorAll("[data-room]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          () => {
+
+            const room =
+              button.dataset.room;
+
+            openRoom(room);
+
+          }
+        );
+
+      });
+
+    /* 玩法 */
+
+    root
+      .querySelectorAll("[data-play]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          () => {
+
+            openPlay(
+              button.dataset.play
+            );
+
+          }
+        );
+
+      });
+
+    /* 手机应用 */
+    root
+      .querySelectorAll("[data-phone-app]")
+      .forEach(button => {
+        listen(button, "click", () => {
+          state.page = `phone-${button.dataset.phoneApp}`;
+          renderPage();
+        });
+      });
+
+    root
+      .querySelectorAll("[data-back-phone]")
+      .forEach(button => {
+        listen(button, "click", () => {
+          state.page = "tab";
+          state.activeTab = "phone";
+          renderPage();
+        });
+      });
+
+    /* 世界书入口 */
+    root
+      .querySelectorAll("[data-open-worldbooks]")
+      .forEach(button => {
+        listen(button, "click", () => {
+          state.page = "worldbooks";
+          renderPage();
+        });
+      });
+
+    root
+      .querySelectorAll("[data-new-worldbook]")
+      .forEach(button => {
+        listen(button, "click", openCreateWorldbook);
+      });
+
+    root
+      .querySelectorAll("[data-delete-worldbook]")
+      .forEach(button => {
+        listen(button, "click", async () => {
+          const id = button.dataset.deleteWorldbook;
+          state.customWorldbooks = state.customWorldbooks.filter(w => w.id !== id);
+          await storageSet("customWorldbooks", state.customWorldbooks);
+          renderPage();
+          toast("世界书已删除");
+        });
+      });
+
+    /* 房子 / 观察室仍然只从节目页进入 */
+
+    /* 档案 */
+
+    root
+      .querySelectorAll("[data-open-archive]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          async () => {
+
+            const id =
+              button.dataset.openArchive;
+
+            const archive =
+              state.archives.find(
+                a =>
+                  a.archiveId === id
+              );
+
+            if (!archive) return;
+
+            const full =
+              await storageGet(
+                `archive:${id}`,
+                archive
+              );
+
+            state.currentArchive =
+              full;
+
+            loadCurrentCharacters();
+
+            state.activeTab =
+              "show";
+
+            state.page =
+              "tab";
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    root
+      .querySelectorAll("[data-delete-archive]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          async () => {
+
+            const id =
+              button.dataset.deleteArchive;
+
+            let ok = true;
+
+            try {
+
+              ok =
+                await state.roche.ui.confirm({
+                  title:"删除恋综档案",
+                  message:
+                    "确定删除这个完整恋综世界吗？此操作无法恢复。"
+                });
+
+            } catch {}
+
+            if (!ok) return;
+
+            state.archives =
+              state.archives.filter(
+                a =>
+                  a.archiveId !== id
+              );
+
+            await storageSet(
+              "archiveIndex",
+              state.archives
+            );
+
+            await storageDelete(
+              `archive:${id}`
+            );
+
+            if (
+              state.currentArchive
+                ?.archiveId === id
+            ) {
+
+              state.currentArchive =
+                null;
+
+              state.characters = [];
+            }
+
+            toast("档案已删除");
+
+            renderPage();
+
+          }
+        );
+
+      });
+
+    /* 设置模式 */
+
+    root
+      .querySelectorAll("[data-mode]")
+      .forEach(button => {
+
+        listen(
+          button,
+          "click",
+          async () => {
+
+            if (!state.currentArchive)
+              return;
+
+            state.currentArchive
+              .participationMode =
+              button.dataset.mode;
+
+            await saveCurrentArchive();
+
+            renderPage();
+
+            toast(
+              button.dataset.mode ===
+              "memory"
+                ? "已切换为记忆融合模式"
+                : "已切换为沉浸式模式"
+            );
+
+          }
+        );
+
+      });
+  }
+
+  function updateTabs() {
+
+    state.container
+      .querySelectorAll("[data-tab]")
+      .forEach(button => {
+
+        button.classList.toggle(
+          "active",
+          state.page === "tab" &&
+          button.dataset.tab ===
+            state.activeTab
+        );
+
+      });
+
+  }
+
+  function updateTopDay() {
+
+    const el =
+      state.container.querySelector(
+        "[data-top-day]"
+      );
+
+    if (!el) return;
+
+    el.textContent =
+      `DAY ${String(
+        state.currentArchive?.currentDay || 1
+      ).padStart(2,"0")}`;
+
+  }
+
+  /* =========================================================
+     房间
+     ========================================================= */
+
+  function openRoom(room) {
+
+    const names = {
+      kitchen:"厨房",
+      living:"客厅",
+      bath:"卫生间",
+      bedroom:"卧室",
+      garden:"花园"
+    };
+
+    const descriptions = {
+      kitchen:
+        "厨房是最容易自然发生互动的地方。做饭、帮忙、偷吃、抢食材，都可以成为剧情入口。",
+      living:
+        "客厅是所有人最容易碰面的公共空间。闲聊、游戏、偶遇都可能在这里发生。",
+      bath:
+        "卫生间暂时不会触发大型剧情，它更像一个短暂脱离镜头的私人角落。",
+      bedroom:
+        "卧室属于更私人的夜晚空间。随着节目规则推进，这里会出现更特殊的事件。",
+      garden:
+        "花园适合两个人短暂离开其他人的视线，进行更安静的交流。"
+    };
+
+    const modal =
+      document.createElement("div");
+
+    modal.className =
+      "xd-modal-wrap";
+
+    modal.innerHTML = `
+      <section class="xd-modal">
+
+        <div class="xd-modal-handle"></div>
+
+        <div class="xd-kicker">
+          LOCATION
+        </div>
+
+        <div
+          class="xd-modal-title"
+          style="margin-top:4px;"
+        >
+          ${esc(names[room] || "地点")}
+        </div>
+
+        <div
+          style="
+            margin-top:12px;
+            font-size:12px;
+            line-height:1.8;
+            color:#75696b;
+          "
+        >
+          ${esc(
+            descriptions[room] ||
+            "这里暂时还没有发生什么。"
+          )}
+        </div>
+
+        <button
+          class="xd-primary"
+          style="
+            width:100%;
+            margin-top:18px;
+          "
+          data-close-room
+        >
+          好，我去看看
+        </button>
+
+      </section>
+    `;
+
+    state.container
+      .querySelector(
+        ".roche-plugin-xindong-xianchang"
+      )
+      .appendChild(modal);
+
+    listen(
+      modal.querySelector(
+        "[data-close-room]"
+      ),
+      "click",
+      () => modal.remove()
+    );
+
+    listen(
+      modal,
+      "click",
+      e => {
+
+        if (e.target === modal)
+          modal.remove();
+
+      }
+    );
+  }
+
+  /* =========================================================
+     玩法
+     ========================================================= */
+
+  function openPlay(type) {
+
+    const data = {
+
+      kitchen: {
+        icon:"🍳",
+        title:"厨房大战",
+        text:
+          "节目组临时宣布：今晚的晚餐由入住嘉宾自己完成。有人抢着掌勺，有人偷偷捣乱，而你刚走进厨房。",
+        button:"进入厨房"
+      },
+
+      message: {
+        icon:"💌",
+        title:"匿名短信夜",
+        text:
+          "手机突然震动了一下。没有备注，没有名字，只有一条刚刚收到的匿名短信。",
+        button:"查看短信"
+      },
+
+      gift: {
+        icon:"🎁",
+        title:"心动礼物",
+        text:
+          "节目组把一个包装精致的小盒子放在了你的房间门口。卡片上没有写名字。",
+        button:"拆开看看"
+      }
+
+    };
+
+    const item =
+      data[type] ||
+      data.kitchen;
+
+    const modal =
+      document.createElement("div");
+
+    modal.className =
+      "xd-modal-wrap";
+
+    modal.innerHTML = `
+      <section class="xd-modal">
+
+        <div class="xd-modal-handle"></div>
+
+        <div
+          style="
+            font-size:34px;
+            margin-bottom:9px;
+          "
+        >
+          ${item.icon}
+        </div>
+
+        <div class="xd-kicker">
+          TODAY'S EVENT
+        </div>
+
+        <div
+          class="xd-modal-title"
+          style="margin-top:4px;"
+        >
+          ${esc(item.title)}
+        </div>
+
+        <div
+          style="
+            margin-top:12px;
+            font-size:12px;
+            line-height:1.8;
+            color:#75696b;
+          "
+        >
+          ${esc(item.text)}
+        </div>
+
+        <div class="xd-modal-actions">
+
+          <button
+            class="xd-small-btn"
+            data-close-play
+          >
+            稍后
+          </button>
+
+          <button
+            class="xd-primary"
+            style="margin-top:0;"
+            data-start-play
+          >
+            ${esc(item.button)}
+          </button>
+
+        </div>
+
+      </section>
+    `;
+
+    state.container
+      .querySelector(
+        ".roche-plugin-xindong-xianchang"
+      )
+      .appendChild(modal);
+
+    listen(
+      modal.querySelector(
+        "[data-close-play]"
+      ),
+      "click",
+      () => modal.remove()
+    );
+
+    listen(
+      modal.querySelector(
+        "[data-start-play]"
+      ),
+      "click",
+      async () => {
+
+        modal.remove();
+
+        if (!state.currentArchive)
+          return;
+
+        state.currentArchive.events =
+          state.currentArchive.events || [];
+
+        state.currentArchive.events.push({
+          type:"play",
+          play:type,
+          createdAt:Date.now()
+        });
+
+        await saveCurrentArchive();
+
+        toast(
+          "玩法入口已开启。"
+        );
+
+      }
+    );
+  }
+
+  /* =========================================================
+     设置
+     ========================================================= */
+
+  function openSettings() {
+
+    state.page =
+      "settings";
+
+    renderPage();
+
+  }
+
+  /* =========================================================
      创建恋综
      ========================================================= */
 
   function openCreateArchive() {
+
+    const selected =
+      new Set();
+
+    const selectedWorldbooks =
+      new Set(
+        [...state.rocheWorldbooks, ...state.customWorldbooks]
+          .filter(wb => wb.defaultSelected)
+          .map(wb => String(wb.id))
+      );
+
     const modal =
       document.createElement("div");
 
-    modal.className = "xd-modal-wrap";
+    modal.className =
+      "xd-modal-wrap";
 
-    const users =
-      state.userPersonas.length
-        ? state.userPersonas
-        : state.user
-          ? [state.user]
-          : [];
+    const candidates =
+      state.candidateCharacters || [];
 
     modal.innerHTML = `
       <section class="xd-modal">
@@ -3835,255 +4868,150 @@
           创建新的恋综
         </div>
 
-        <!-- USER -->
-
         <div class="xd-field">
 
           <label>
-            ① 选择本季的你
-          </label>
-
-          <div class="xd-check-list">
-
-            ${
-              users.length
-                ? users
-                    .map(
-                      (user, index) => `
-                        <label class="xd-check">
-
-                          <input
-                            type="radio"
-                            name="xd-user"
-                            value="${escapeHTML(
-                              user.id ||
-                              user.personaId ||
-                              index
-                            )}"
-                            ${
-                              index === 0
-                                ? "checked"
-                                : ""
-                            }
-                          >
-
-                          ${avatarHTML(
-                            user,
-                            "xd-avatar"
-                          )}
-
-                          <div class="xd-check-main">
-
-                            <div class="xd-check-title">
-                              ${escapeHTML(
-                                realName(user)
-                              )}
-                            </div>
-
-                            <div class="xd-check-desc">
-                              ${
-                                user.handle
-                                  ? "@" +
-                                    escapeHTML(
-                                      user.handle
-                                    )
-                                  : "USER 人设"
-                              }
-                            </div>
-
-                          </div>
-
-                        </label>
-                      `
-                    )
-                    .join("")
-                : `
-                  <div class="xd-empty">
-                    暂时没有可用的 USER 人设。
-                  </div>
-                `
-            }
-
-          </div>
-
-        </div>
-
-        <!-- 嘉宾 -->
-
-        <div class="xd-field">
-
-          <label>
-            ② 选择本季嘉宾
-          </label>
-
-          <div class="xd-check-list">
-
-            ${
-              state.characterPool.length
-                ? state.characterPool
-                    .map(
-                      (char) => `
-                        <label class="xd-check">
-
-                          <input
-                            type="checkbox"
-                            name="xd-char"
-                            value="${escapeHTML(
-                              char.id
-                            )}"
-                          >
-
-                          ${avatarHTML(char)}
-
-                          <div class="xd-check-main">
-
-                            <div class="xd-check-title">
-                              ${escapeHTML(
-                                realName(char)
-                              )}
-                            </div>
-
-                            <div class="xd-check-desc">
-                              ${
-                                char.handle
-                                  ? "@" +
-                                    escapeHTML(
-                                      char.handle
-                                    )
-                                  : "嘉宾"
-                              }
-                            </div>
-
-                          </div>
-
-                        </label>
-                      `
-                    )
-                    .join("")
-                : `
-                  <div class="xd-empty">
-                    Roche 中没有可选择的角色。
-                  </div>
-                `
-            }
-
-          </div>
-
-        </div>
-
-        <!-- 世界书 -->
-
-        <div class="xd-field">
-
-          <label>
-            ③ 选择世界书
-          </label>
-
-          <div class="xd-check-list">
-
-            ${
-              state.worldbooks.length
-                ? state.worldbooks
-                    .map(
-                      (book) => `
-                        <label class="xd-check">
-
-                          <input
-                            type="checkbox"
-                            name="xd-world"
-                            value="${escapeHTML(
-                              book.id ||
-                              book.worldbookId
-                            )}"
-                          >
-
-                          <div
-                            style="
-                              width:34px;
-                              height:34px;
-                              flex:0 0 34px;
-                              border-radius:11px;
-                              background:#f1e5e6;
-                              display:grid;
-                              place-items:center;
-                            "
-                          >
-                            ✦
-                          </div>
-
-                          <div class="xd-check-main">
-
-                            <div class="xd-check-title">
-                              ${escapeHTML(
-                                book.name ||
-                                book.title ||
-                                "未命名世界书"
-                              )}
-                            </div>
-
-                            <div class="xd-check-desc">
-                              加入本季世界
-                            </div>
-
-                          </div>
-
-                        </label>
-                      `
-                    )
-                    .join("")
-                : `
-                  <div class="xd-empty"
-                    style="padding:22px 15px;"
-                  >
-
-                    <div class="xd-empty-icon">
-                      ✦
-                    </div>
-
-                    <div class="xd-empty-title">
-                      世界书库还是空的
-                    </div>
-
-                    <div class="xd-empty-text">
-                      可以先去世界书库创建自己的世界书。
-                    </div>
-
-                    <button
-                      class="xd-primary"
-                      data-create-worldbook
-                    >
-                      创建世界书
-                    </button>
-
-                  </div>
-                `
-            }
-
-          </div>
-
-        </div>
-
-        <!-- 节目设置 -->
-
-        <div class="xd-field">
-
-          <label>
-            ④ 本季设定
+            恋综名称
           </label>
 
           <input
-            data-archive-title
-            placeholder="恋综名称，例如：心动小屋"
+            data-title
+            placeholder="例如：心动小屋"
             maxlength="30"
           >
 
+        </div>
+
+        <div class="xd-field">
+
+          <label>
+            本季氛围
+          </label>
+
           <input
-            data-archive-tone
-            style="margin-top:8px;"
+            data-tone
             value="温柔、暧昧、轻微修罗场"
             maxlength="60"
-            placeholder="本季氛围"
           >
+
+        </div>
+
+        <div class="xd-field">
+
+          <label>
+            选择本季世界书
+          </label>
+
+          <div style="font-size:10px;color:#8e8183;line-height:1.6;">
+            可以同时勾选 Roche 世界书与「心动现场」自建世界书。开始这一季后会保存本次快照，不影响其他恋综。
+          </div>
+
+          <div class="xd-selector-list" style="max-height:220px;">
+            ${
+              [...state.rocheWorldbooks, ...state.customWorldbooks].length
+                ? [...state.rocheWorldbooks, ...state.customWorldbooks].map(wb => `
+                    <button class="xd-selector ${wb.defaultSelected ? "selected" : ""}" data-worldbook-select="${esc(wb.id)}">
+                      <div style="width:34px;height:34px;border-radius:11px;background:#f1e2e4;display:grid;place-items:center;flex:0 0 34px;">📖</div>
+                      <div style="min-width:0;flex:1;">
+                        <div style="font-size:12px;font-weight:780;">${esc(wb.name)}</div>
+                        <div style="margin-top:3px;font-size:9px;color:#a97983;">${esc(wb.sourceLabel || "自建世界书")}</div>
+                      </div>
+                      <div class="xd-check">✓</div>
+                    </button>
+                  `).join("")
+                : `<div class="xd-empty" style="padding:18px 10px;">还没有可用世界书。你可以先去「档案 → 世界书库」创建。</div>`
+            }
+          </div>
+        </div>
+
+        <div class="xd-field">
+
+          <label>
+            选择本季嘉宾
+          </label>
+
+          <div
+            style="
+              font-size:10px;
+              color:#8e8183;
+              line-height:1.6;
+            "
+          >
+            下面只是 Roche 的角色候选池。
+            只有勾选并创建后，
+            才会正式进入这个恋综档案。
+          </div>
+
+          <div
+            class="xd-selector-list"
+          >
+
+            ${
+              candidates.length
+
+                ? candidates.map(char => `
+                    <button
+                      class="xd-selector"
+                      data-select="${esc(
+                        char.id
+                      )}"
+                    >
+
+                      ${avatarHTML(char)}
+
+                      <div
+                        style="
+                          min-width:0;
+                          flex:1;
+                        "
+                      >
+
+                        <div
+                          style="
+                            font-size:12px;
+                            font-weight:780;
+                          "
+                        >
+                          ${esc(
+                            nameOf(char)
+                          )}
+                        </div>
+
+                        <div
+                          style="
+                            margin-top:3px;
+                            font-size:9px;
+                            color:#a97983;
+                          "
+                        >
+                          ${esc(
+                            handleOf(char) ||
+                            "GUEST"
+                          )}
+                        </div>
+
+                      </div>
+
+                      <div class="xd-check">
+                        ✓
+                      </div>
+
+                    </button>
+                  `).join("")
+
+                : `
+                  <div
+                    class="xd-empty"
+                    style="
+                      padding:22px 12px;
+                    "
+                  >
+                    暂时没有读取到 Roche 角色。
+                  </div>
+                `
+            }
+
+          </div>
 
         </div>
 
@@ -4100,52 +5028,73 @@
             "
           >
 
-            <label class="xd-check">
+            <button
+              class="xd-selector selected"
+              data-create-mode="immersive"
+            >
 
-              <input
-                type="radio"
-                name="xd-mode"
-                value="immersive"
-                checked
-              >
+              <div style="flex:1;">
 
-              <div class="xd-check-main">
-
-                <div class="xd-check-title">
+                <div
+                  style="
+                    font-size:12px;
+                    font-weight:780;
+                  "
+                >
                   沉浸式
                 </div>
 
-                <div class="xd-check-desc">
-                  读取你的人设 + Roche 记忆，
-                  保留你与角色过去的关系。
+                <div
+                  style="
+                    margin-top:3px;
+                    font-size:9px;
+                    color:#8e8183;
+                  "
+                >
+                  只按照人设参与恋综
                 </div>
 
               </div>
 
-            </label>
+              <div class="xd-check">
+                ✓
+              </div>
 
-            <label class="xd-check">
+            </button>
 
-              <input
-                type="radio"
-                name="xd-mode"
-                value="persona"
-              >
+            <button
+              class="xd-selector"
+              data-create-mode="memory"
+            >
 
-              <div class="xd-check-main">
+              <div style="flex:1;">
 
-                <div class="xd-check-title">
-                  非沉浸式
+                <div
+                  style="
+                    font-size:12px;
+                    font-weight:780;
+                  "
+                >
+                  记忆融合
                 </div>
 
-                <div class="xd-check-desc">
-                  只读取人设，不读取过去记忆，
-                  按本季设定开始关系。
+                <div
+                  style="
+                    margin-top:3px;
+                    font-size:9px;
+                    color:#8e8183;
+                  "
+                >
+                  人设 + 过去与你的记忆
                 </div>
 
               </div>
 
-            </label>
+              <div class="xd-check">
+                ✓
+              </div>
+
+            </button>
 
           </div>
 
@@ -4155,7 +5104,7 @@
 
           <button
             class="xd-small-btn"
-            data-modal-close
+            data-close
           >
             取消
           </button>
@@ -4165,7 +5114,7 @@
             style="margin-top:0;"
             data-create
           >
-            开机
+            开始这一季
           </button>
 
         </div>
@@ -4179,1622 +5128,659 @@
       )
       .appendChild(modal);
 
-    modal
-      .querySelector("[data-modal-close]")
-      .addEventListener(
-        "click",
-        () => modal.remove()
-      );
-
-    const worldButton =
-      modal.querySelector(
-        "[data-create-worldbook]"
-      );
-
-    if (worldButton) {
-      worldButton.addEventListener(
-        "click",
-        () => {
-          modal.remove();
-          openWorldbookLibrary(true);
-        }
-      );
-    }
+    /* 嘉宾选择 */
 
     modal
-      .querySelector("[data-create]")
-      .addEventListener(
-        "click",
-        async () => {
+      .querySelectorAll("[data-select]")
+      .forEach(button => {
 
-          const title =
-            modal
-              .querySelector(
-                "[data-archive-title]"
-              )
-              .value
-              .trim() ||
-            "心动小屋";
+        listen(
+          button,
+          "click",
+          () => {
 
-          const tone =
-            modal
-              .querySelector(
-                "[data-archive-tone]"
-              )
-              .value
-              .trim() ||
-            "温柔、暧昧、轻微修罗场";
+            const id =
+              button.dataset.select;
 
-          const selectedUserId =
-            modal.querySelector(
-              'input[name="xd-user"]:checked'
-            )?.value;
+            if (selected.has(id)) {
 
-          const selectedUser =
-            users.find(
-              (user, index) =>
-                String(
-                  user.id ||
-                  user.personaId ||
-                  index
-                ) === String(
-                  selectedUserId
-                )
-            ) || users[0];
+              selected.delete(id);
 
-          const selectedCharIds =
-            Array.from(
-              modal.querySelectorAll(
-                'input[name="xd-char"]:checked'
-              )
-            ).map(
-              (input) => input.value
-            );
+              button.classList.remove(
+                "selected"
+              );
 
-          const selectedWorldIds =
-            Array.from(
-              modal.querySelectorAll(
-                'input[name="xd-world"]:checked'
-              )
-            ).map(
-              (input) => input.value
-            );
+            } else {
 
-          const mode =
-            modal.querySelector(
-              'input[name="xd-mode"]:checked'
-            )?.value ||
-            "immersive";
+              selected.add(id);
 
-          const picked =
-            state.characterPool
-              .filter((char) =>
-                selectedCharIds.includes(
-                  String(char.id)
-                )
-              )
-              .map((char) => ({
-                characterId: char.id,
-                name: char.name || "",
-                handle: char.handle || "",
-                avatar: char.avatar || "",
-                bio: char.bio || "",
-                personaSnapshot:
-                  char.persona ||
-                  char.bio ||
-                  "",
-                joinedDay: 1,
-                isNewGuest: false,
-              }));
+              button.classList.add(
+                "selected"
+              );
 
-          const selectedWorldbooks =
-            state.worldbooks.filter(
-              (book) =>
-                selectedWorldIds.includes(
-                  String(
-                    book.id ||
-                    book.worldbookId
-                  )
-                )
-            );
+            }
 
-          const archive = {
-            archiveId: uid(),
-
-            title,
-
-            createdAt: Date.now(),
-            lastSavedAt: Date.now(),
-
-            userPersona: {
-              personaId:
-                selectedUser?.id ||
-                selectedUser?.personaId ||
-                uid(),
-
-              name:
-                selectedUser?.name ||
-                "",
-
-              handle:
-                selectedUser?.handle ||
-                "",
-
-              avatar:
-                selectedUser?.avatar ||
-                "",
-
-              personaSnapshot:
-                selectedUser?.persona ||
-                selectedUser?.bio ||
-                "",
-            },
-
-            characters: picked,
-
-            /*
-              只有勾选的世界书进入这里。
-              没勾选的不属于本档案。
-            */
-            worldbook: {
-              selectedBookIds:
-                selectedWorldbooks.map(
-                  (book) =>
-                    book.id ||
-                    book.worldbookId
-                ),
-
-              selectedBooks:
-                selectedWorldbooks.map(
-                  (book) => ({
-                    id:
-                      book.id ||
-                      book.worldbookId,
-
-                    name:
-                      book.name ||
-                      book.title ||
-                      "未命名世界书",
-
-                    snapshot:
-                      book.content ||
-                      book.description ||
-                      "",
-                  })
-                ),
-            },
-
-            seasonConfig: {
-              description:
-                "一档以自然互动与真实心动为核心的恋爱真人秀。",
-
-              tone,
-
-              mode,
-
-              memoryIncluded:
-                mode === "immersive",
-
-              forbiddenContent: "",
-            },
-
-            currentDay: 1,
-
-            currentTime: "20:36",
-
-            currentSceneLabel:
-              "心动小屋 · 客厅",
-
-            currentLocation:
-              "living",
-
-            timeline: [
-              {
-                day: 1,
-                summary: "",
-                fullNarrative: "",
-              },
-            ],
-
-            relationships: {
-              userToChar: {},
-              charToChar: {},
-            },
-
-            privateMessages: {},
-
-            observationLog: [],
-
-            locationState: {
-              living: {
-                characterIds: [],
-              },
-
-              kitchen: {
-                characterIds: [],
-              },
-
-              garden: {
-                characterIds: [],
-              },
-
-              bedroom: {
-                characterIds: [],
-              },
-
-              balcony: {
-                characterIds: [],
-              },
-            },
-
-            phone: {
-              feed: [],
-              weibo: [],
-              weiboCategory: "all",
-              notes: [],
-            },
-
-            dailyEvents:
-              DEFAULT_EVENTS.map(
-                (event) => ({
-                  ...event,
-                })
-              ),
-
-            activeEvent: null,
-
-            events: [],
-
-            lastNarrative:
-              "节目正式开机。所有人第一次进入心动小屋。",
-
-            lastQuote:
-              "“欢迎来到《心动现场》。”",
-          };
-
-          /*
-            初始化关系。
-            只有选中的嘉宾。
-          */
-
-          picked.forEach((char) => {
-            archive.relationships.userToChar[
-              char.characterId
-            ] = {
-              tags: ["初次见面"],
-              statusLine:
-                "你们的故事才刚刚开始。",
-            };
-          });
-
-          /*
-            初始化小屋状态。
-          */
-
-          if (picked.length) {
-            archive.locationState.living.characterIds =
-              picked
-                .slice(0, 2)
-                .map(
-                  (char) =>
-                    char.characterId
-                );
           }
+        );
 
-          /*
-            初始化动态。
-          */
+      });
 
-          archive.phone.feed = [
-            {
-              author:
-                "《心动现场》节目组",
-
-              role: "PRODUCER",
-
-              text:
-                "本季节目正式开机。欢迎来到心动小屋。",
-
-              time:
-                "本季 Day 01",
-            },
-          ];
-
-          /*
-            初始化微博。
-          */
-
-          archive.phone.weibo = [
-            {
-              category: "report",
-
-              author:
-                "娱乐现场",
-
-              text:
-                `《${title}》正式开机，新的恋综世界开始运行。`,
-
-              time:
-                "刚刚",
-            },
-          ];
-
-          state.archives.unshift({
-            archiveId:
-              archive.archiveId,
-
-            title:
-              archive.title,
-
-            currentDay: 1,
-
-            characterNames:
-              picked.map(
-                (c) => c.name
-              ),
-
-            characterAvatars:
-              picked.map(
-                (c) => c.avatar
-              ),
-
-            userName:
-              archive.userPersona.name,
-
-            lastSummary:
-              "新的恋综世界刚刚开机。",
-
-            lastSavedAt:
-              archive.lastSavedAt,
-          });
-
-          state.currentArchive =
-            archive;
-
-          state.user =
-            selectedUser;
-
-          await safeSet(
-            `archive:${archive.archiveId}`,
-            archive
-          );
-
-          await safeSet(
-            "archiveIndex",
-            state.archives
-          );
-
-          modal.remove();
-
-          state.activeTab =
-            "show";
-
-          toast(
-            `《${title}》已开机`
-          );
-
-          renderPage();
-          updateTopDay();
-        }
-      );
-  }
-
-  /* =========================================================
-     世界书库
-     ========================================================= */
-
-  function openWorldbookLibrary(fromCreate = false) {
-    const modal =
-      document.createElement("div");
-
-    modal.className =
-      "xd-modal-wrap";
-
-    modal.innerHTML = `
-      <section class="xd-modal">
-
-        <div class="xd-modal-handle"></div>
-
-        <div class="xd-kicker">
-          WORLD LIBRARY
-        </div>
-
-        <div
-          class="xd-modal-title"
-          style="margin-top:4px;"
-        >
-          世界书库
-        </div>
-
-        <div
-          style="
-            margin-top:7px;
-            color:#8e8183;
-            font-size:10px;
-            line-height:1.7;
-          "
-        >
-          这里管理你提前准备好的世界书。
-          创建恋综时再从这里勾选需要加入本季的世界。
-        </div>
-
-        <div
-          style="
-            margin-top:15px;
-          "
-        >
-
-          ${
-            state.worldbooks.length
-              ? state.worldbooks
-                  .map(
-                    (book) => `
-                      <div class="xd-library-card">
-
-                        <div class="xd-library-title">
-                          ${escapeHTML(
-                            book.name ||
-                            book.title ||
-                            "未命名世界书"
-                          )}
-                        </div>
-
-                        <div class="xd-library-meta">
-                          ${escapeHTML(
-                            book.description ||
-                            book.content?.slice?.(
-                              0,
-                              80
-                            ) ||
-                            "Roche 世界书"
-                          )}
-                        </div>
-
-                      </div>
-                    `
-                  )
-                  .join("")
-              : `
-                <div class="xd-empty">
-
-                  <div class="xd-empty-icon">
-                    ✦
-                  </div>
-
-                  <div class="xd-empty-title">
-                    世界书库为空
-                  </div>
-
-                  <div class="xd-empty-text">
-                    如果你的 Roche 版本提供世界书写入 API，
-                    可以在这里继续扩展“新建世界书”功能。
-                  </div>
-
-                </div>
-              `
-          }
-
-        </div>
-
-        <div class="xd-modal-actions">
-
-          <button
-            class="xd-small-btn"
-            data-world-close
-          >
-            关闭
-          </button>
-
-          ${
-            fromCreate
-              ? `
-                <button
-                  class="xd-primary"
-                  style="margin-top:0;"
-                  data-world-back
-                >
-                  返回创建
-                </button>
-              `
-              : ""
-          }
-
-        </div>
-
-      </section>
-    `;
-
-    state.container
-      .querySelector(
-        ".roche-plugin-xindong-xianchang"
-      )
-      .appendChild(modal);
-
+    /* 世界书选择 */
     modal
-      .querySelector("[data-world-close]")
-      .addEventListener(
-        "click",
-        () => modal.remove()
-      );
+      .querySelectorAll("[data-worldbook-select]")
+      .forEach(button => {
+        listen(button, "click", () => {
+          const id = String(button.dataset.worldbookSelect);
+          if (selectedWorldbooks.has(id)) {
+            selectedWorldbooks.delete(id);
+            button.classList.remove("selected");
+          } else {
+            selectedWorldbooks.add(id);
+            button.classList.add("selected");
+          }
+        });
+      });
 
-    const back =
-      modal.querySelector(
-        "[data-world-back]"
-      );
-
-    if (back) {
-      back.addEventListener(
-        "click",
-        () => {
-          modal.remove();
-          openCreateArchive();
-        }
-      );
-    }
-  }
-
-  /* =========================================================
-     设置
-     ========================================================= */
-
-  function openSettings() {
-    if (!state.currentArchive) {
-      toast("请先创建一个恋综档案");
-      return;
-    }
-
-    const mode =
-      state.currentArchive
-        .seasonConfig?.mode ||
+    /* 模式选择 */
+    let createMode =
       "immersive";
 
-    const modal =
-      document.createElement("div");
+    modal
+      .querySelectorAll(
+        "[data-create-mode]"
+      )
+      .forEach(button => {
 
-    modal.className =
-      "xd-modal-wrap";
+        listen(
+          button,
+          "click",
+          () => {
 
-    modal.innerHTML = `
-      <section class="xd-modal">
+            createMode =
+              button.dataset.createMode;
 
-        <div class="xd-modal-handle"></div>
-
-        <div class="xd-kicker">
-          SETTINGS
-        </div>
-
-        <div
-          class="xd-modal-title"
-          style="margin-top:4px;"
-        >
-          本季设置
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            参与模式
-          </label>
-
-          <div style="display:grid;gap:8px;">
-
-            <label class="xd-check">
-
-              <input
-                type="radio"
-                name="xd-setting-mode"
-                value="immersive"
-                ${
-                  mode === "immersive"
-                    ? "checked"
-                    : ""
-                }
-              >
-
-              <div class="xd-check-main">
-
-                <div class="xd-check-title">
-                  沉浸式
-                </div>
-
-                <div class="xd-check-desc">
-                  读取当前 USER 人设与记忆。
-                  角色会按照已有关系进入本季。
-                </div>
-
-              </div>
-
-            </label>
-
-            <label class="xd-check">
-
-              <input
-                type="radio"
-                name="xd-setting-mode"
-                value="persona"
-                ${
-                  mode === "persona"
-                    ? "checked"
-                    : ""
-                }
-              >
-
-              <div class="xd-check-main">
-
-                <div class="xd-check-title">
-                  非沉浸式
-                </div>
-
-                <div class="xd-check-desc">
-                  只读取人设，不使用过去记忆。
-                </div>
-
-              </div>
-
-            </label>
-
-          </div>
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            当前 USER
-          </label>
-
-          <div
-            style="
-              padding:12px;
-              background:white;
-              border-radius:14px;
-              font-size:11px;
-            "
-          >
-            ${escapeHTML(
-              state.currentArchive
-                .userPersona?.name ||
-              "未命名"
-            )}
-          </div>
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            当前世界书
-          </label>
-
-          <div
-            style="
-              padding:12px;
-              background:white;
-              border-radius:14px;
-              font-size:10px;
-              line-height:1.7;
-              color:#75696b;
-            "
-          >
-            ${
-              (
-                state.currentArchive
-                  .worldbook
-                  ?.selectedBooks ||
-                []
+            modal
+              .querySelectorAll(
+                "[data-create-mode]"
               )
-                .map(
-                  (book) =>
-                    escapeHTML(
-                      book.name
-                    )
-                )
-                .join("、") ||
-              "未选择世界书"
-            }
-          </div>
+              .forEach(item => {
 
-        </div>
+                item.classList.toggle(
+                  "selected",
+                  item.dataset.createMode ===
+                    createMode
+                );
 
-        <div class="xd-modal-actions">
+              });
 
-          <button
-            class="xd-small-btn"
-            data-setting-close
-          >
-            取消
-          </button>
+          }
+        );
 
-          <button
-            class="xd-primary"
-            style="margin-top:0;"
-            data-setting-save
-          >
-            保存
-          </button>
+      });
 
-        </div>
+    listen(
+      modal.querySelector(
+        "[data-close]"
+      ),
+      "click",
+      () => modal.remove()
+    );
 
-      </section>
-    `;
+    listen(
+      modal,
+      "click",
+      e => {
 
-    state.container
-      .querySelector(
-        ".roche-plugin-xindong-xianchang"
-      )
-      .appendChild(modal);
-
-    modal
-      .querySelector("[data-setting-close]")
-      .addEventListener(
-        "click",
-        () => modal.remove()
-      );
-
-    modal
-      .querySelector("[data-setting-save]")
-      .addEventListener(
-        "click",
-        async () => {
-
-          const newMode =
-            modal.querySelector(
-              'input[name="xd-setting-mode"]:checked'
-            )?.value ||
-            "immersive";
-
-          state.currentArchive
-            .seasonConfig.mode =
-            newMode;
-
-          state.currentArchive
-            .seasonConfig.memoryIncluded =
-            newMode === "immersive";
-
-          await saveCurrentArchive();
-
+        if (e.target === modal)
           modal.remove();
 
-          toast("本季设置已保存");
-        }
-      );
-  }
-
-  /* =========================================================
-     嘉宾详情
-     保持原有思路
-     ========================================================= */
-
-  function openGuestDetail(char) {
-    const persona =
-      char.personaSnapshot ||
-      char.persona ||
-      char.bio ||
-      "暂无可展示的人设简介。";
-
-    const modal =
-      document.createElement("div");
-
-    modal.className =
-      "xd-modal-wrap";
-
-    modal.innerHTML = `
-      <section class="xd-modal">
-
-        <div class="xd-modal-handle"></div>
-
-        <div
-          style="
-            display:flex;
-            align-items:center;
-            gap:13px;
-          "
-        >
-
-          ${avatarHTML(char)}
-
-          <div>
-
-            <div class="xd-modal-title">
-              ${escapeHTML(
-                realName(char)
-              )}
-            </div>
-
-            <div
-              style="
-                font-size:10px;
-                color:#a97983;
-                margin-top:3px;
-              "
-            >
-              ${
-                char.handle
-                  ? "@" +
-                    escapeHTML(
-                      char.handle
-                    )
-                  : "GUEST"
-              }
-            </div>
-
-          </div>
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            简介
-          </label>
-
-          <div
-            style="
-              font-size:12px;
-              line-height:1.7;
-              color:#75696b;
-            "
-          >
-            ${escapeHTML(
-              char.bio ||
-              "这个人没有留下简介。"
-            )}
-          </div>
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            节目人设
-          </label>
-
-          <details
-            style="
-              background:white;
-              border-radius:15px;
-              padding:12px;
-            "
-          >
-
-            <summary
-              style="
-                cursor:pointer;
-                color:#a97983;
-                font-size:11px;
-                font-weight:750;
-              "
-            >
-              展开人设
-            </summary>
-
-            <div
-              style="
-                margin-top:9px;
-                font-size:11px;
-                line-height:1.8;
-                color:#75696b;
-              "
-            >
-              ${escapeHTML(
-                persona
-              ).slice(0, 500)}
-            </div>
-
-          </details>
-
-        </div>
-
-        <div class="xd-field">
-
-          <label>
-            当前关系
-          </label>
-
-          <div
-            style="
-              padding:12px;
-              background:#fff;
-              border-radius:15px;
-              color:#75696b;
-              font-size:11px;
-              line-height:1.7;
-            "
-          >
-            ${
-              state.currentArchive
-                ?.relationships
-                ?.userToChar?.[
-                  char.characterId ||
-                  char.id
-                ]?.statusLine ||
-              "你们的故事才刚刚开始。"
-            }
-          </div>
-
-        </div>
-
-        <div class="xd-modal-actions">
-
-          <button
-            class="xd-small-btn"
-            data-modal-close
-          >
-            关闭
-          </button>
-
-          <button
-            class="xd-primary"
-            style="margin-top:0;"
-            data-private-preview
-          >
-            💬 私信
-          </button>
-
-        </div>
-
-      </section>
-    `;
-
-    state.container
-      .querySelector(
-        ".roche-plugin-xindong-xianchang"
-      )
-      .appendChild(modal);
-
-    modal
-      .querySelector("[data-modal-close]")
-      .addEventListener(
-        "click",
-        () => modal.remove()
-      );
-
-    modal
-      .querySelector("[data-private-preview]")
-      .addEventListener(
-        "click",
-        () => {
-          modal.remove();
-          state.activeTab = "phone";
-          state.currentPhoneView =
-            "messages";
-          renderPage();
-
-          setTimeout(() => {
-            const id =
-              char.characterId ||
-              char.id;
-
-            const card =
-              state.container.querySelector(
-                `[data-chat-character="${CSS.escape(
-                  String(id)
-                )}"]`
-              );
-
-            if (card) {
-              openPrivateChat(char);
-            }
-          }, 30);
-        }
-      );
-  }
-
-  /* =========================================================
-     页面渲染
-     ========================================================= */
-
-  function renderPage() {
-    const content =
-      state.container.querySelector(
-        "[data-content]"
-      );
-
-    if (!content) return;
-
-    let html = "";
-
-    if (state.activeTab === "show") {
-      if (state.currentHouseView !== "overview") {
-        html =
-          renderHouseLocation(
-            state.currentHouseView
-          );
-      } else {
-        html = renderShow();
       }
-    }
-
-    else if (state.activeTab === "guests") {
-      html = renderGuests();
-    }
-
-    else if (state.activeTab === "phone") {
-      html =
-        renderPhoneSubpage();
-    }
-
-    else {
-      html = renderArchives();
-    }
-
-    content.innerHTML = html;
-
-    bindPageEvents();
-
-    state.container
-      .querySelectorAll("[data-tab]")
-      .forEach((button) => {
-        button.classList.toggle(
-          "active",
-          button.dataset.tab ===
-            state.activeTab
-        );
-      });
-
-    updateTopDay();
-  }
-
-  /* =========================================================
-     页面事件
-     ========================================================= */
-
-  function bindPageEvents() {
-
-    /* 今日玩法 */
-
-    state.container
-      .querySelectorAll("[data-event-id]")
-      .forEach((element) => {
-
-        const handler = () => {
-          triggerDailyEvent(
-            element.dataset.eventId
-          );
-        };
-
-        element.addEventListener(
-          "click",
-          handler
-        );
-
-        state.listeners.push(() =>
-          element.removeEventListener(
-            "click",
-            handler
-          )
-        );
-      });
-
-    /* 小屋 */
-
-    state.container
-      .querySelectorAll("[data-room]")
-      .forEach((room) => {
-
-        const handler = (event) => {
-
-          event.stopPropagation();
-
-          state.currentHouseView =
-            room.dataset.room;
-
-          renderPage();
-        };
-
-        room.addEventListener(
-          "click",
-          handler
-        );
-
-        state.listeners.push(() =>
-          room.removeEventListener(
-            "click",
-            handler
-          )
-        );
-      });
-
-    state.container
-      .querySelectorAll("[data-house-back]")
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => {
-            state.currentHouseView =
-              "overview";
-
-            renderPage();
-          }
-        );
-      });
-
-    /* 观察室 */
-
-    state.container
-      .querySelectorAll(
-        "[data-open-observe]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => {
-            openObservationPage();
-          }
-        );
-      });
-
-    state.container
-      .querySelectorAll(
-        "[data-observe-back]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => {
-            openObservationPage(
-              false
-            );
-          }
-        );
-      });
-
-    /* 创建 */
-
-    state.container
-      .querySelectorAll(
-        "[data-new-archive]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => openCreateArchive()
-        );
-      });
-
-    /* 档案 */
-
-    state.container
-      .querySelectorAll(
-        "[data-open-archive]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          async () => {
-
-            const archive =
-              state.archives.find(
-                (item) =>
-                  item.archiveId ===
-                  button.dataset.openArchive
-              );
-
-            if (!archive) return;
-
-            const full =
-              await safeGet(
-                `archive:${archive.archiveId}`,
-                null
-              );
-
-            state.currentArchive =
-              full || archive;
-
-            state.activeTab =
-              "show";
-
-            state.currentHouseView =
-              "overview";
-
-            state.currentPhoneView =
-              "home";
-
-            renderPage();
-            updateTopDay();
-          }
-        );
-      });
-
-    /* 删除 */
-
-    state.container
-      .querySelectorAll(
-        "[data-delete-archive]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          async () => {
-
-            const id =
-              button.dataset.deleteArchive;
-
-            const ok =
-              await confirmDialog(
-                "删除恋综档案",
-                "确定删除这个完整恋综世界吗？此操作无法恢复。"
-              );
-
-            if (!ok) return;
-
-            state.archives =
-              state.archives.filter(
-                (archive) =>
-                  archive.archiveId !== id
-              );
-
-            await safeSet(
-              "archiveIndex",
-              state.archives
-            );
-
-            await safeDelete(
-              `archive:${id}`
-            );
-
-            if (
-              state.currentArchive
-                ?.archiveId === id
-            ) {
-              state.currentArchive =
-                null;
-            }
-
-            toast("档案已删除");
-
-            renderPage();
-            updateTopDay();
-          }
-        );
-      });
-
-    /* 嘉宾 */
-
-    state.container
-      .querySelectorAll(
-        "[data-guest-id]"
-      )
-      .forEach((card) => {
-
-        card.addEventListener(
-          "click",
-          () => {
-
-            const char =
-              selectedCharacter(
-                card.dataset.guestId
-              );
-
-            if (char) {
-              openGuestDetail(
-                char
-              );
-            }
-          }
-        );
-      });
-
-    /* 手机 */
-
-    state.container
-      .querySelectorAll(
-        "[data-phone-app]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => {
-
-            state.currentPhoneView =
-              button.dataset.phoneApp;
-
-            renderPage();
-          }
-        );
-      });
-
-    state.container
-      .querySelectorAll(
-        "[data-phone-home]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () => {
-
-            state.currentPhoneView =
-              "home";
-
-            renderPage();
-          }
-        );
-      });
-
-    /* 微博分类 */
-
-    state.container
-      .querySelectorAll(
-        "[data-weibo-category]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          async () => {
-
-            if (
-              state.currentArchive?.phone
-            ) {
-              state.currentArchive
-                .phone
-                .weiboCategory =
-                button.dataset
-                  .weiboCategory;
-
-              await saveCurrentArchive();
-            }
-
-            renderPage();
-          }
-        );
-      });
-
-    /* 私信 */
-
-    state.container
-      .querySelectorAll(
-        "[data-chat-character]"
-      )
-      .forEach((card) => {
-
-        card.addEventListener(
-          "click",
-          () => {
-
-            const char =
-              selectedCharacter(
-                card.dataset
-                  .chatCharacter
-              );
-
-            if (char) {
-              openPrivateChat(
-                char
-              );
-            }
-          }
-        );
-      });
-
-    /* 世界书库 */
-
-    state.container
-      .querySelectorAll(
-        "[data-world-library]"
-      )
-      .forEach((button) => {
-
-        button.addEventListener(
-          "click",
-          () =>
-            openWorldbookLibrary(
-              false
+    );
+
+    listen(
+      modal.querySelector(
+        "[data-create]"
+      ),
+      "click",
+      async () => {
+
+        const title =
+          modal
+            .querySelector("[data-title]")
+            .value.trim() ||
+          "心动小屋";
+
+        const tone =
+          modal
+            .querySelector("[data-tone]")
+            .value.trim() ||
+          "温柔、暧昧、轻微修罗场";
+
+        const picked =
+          candidates
+            .filter(c =>
+              selected.has(
+                String(c.id)
+              )
             )
+            .map(c => ({
+              characterId:c.id,
+              name:c.name || "",
+              handle:c.handle || "",
+              avatar:c.avatar || "",
+              bio:c.bio || "",
+              personaSnapshot:
+                c.persona ||
+                c.bio ||
+                "",
+
+              joinedDay:1,
+
+              isNewGuest:false
+            }));
+
+        if (!picked.length) {
+
+          toast(
+            "至少选择一位嘉宾"
+          );
+
+          return;
+        }
+
+        const archive = {
+
+          archiveId:uid(),
+
+          title,
+
+          createdAt:Date.now(),
+
+          lastSavedAt:Date.now(),
+
+          participationMode:
+            createMode,
+
+          userPersona:{
+            personaId:
+              state.user?.id ||
+              uid(),
+
+            name:
+              state.user?.name ||
+              "",
+
+            handle:
+              state.user?.handle ||
+              "",
+
+            avatar:
+              state.user?.avatar ||
+              "",
+
+            personaSnapshot:
+              state.user?.persona ||
+              state.user?.bio ||
+              ""
+          },
+
+          characters:picked,
+
+          worldbooks:
+            [...state.rocheWorldbooks, ...state.customWorldbooks]
+              .filter(wb => selectedWorldbooks.has(String(wb.id)))
+              .map(wb => ({
+                id: wb.id,
+                name: wb.name,
+                source: wb.source || "custom",
+                sourceLabel: wb.sourceLabel || "自建世界书",
+                description: wb.description || "",
+                content: wb.content || "",
+                snapshotAt: Date.now()
+              })),
+
+          seasonConfig:{
+            description:
+              "一档以自然互动与真实心动为核心的恋爱真人秀。",
+
+            tone,
+
+            forbiddenContent:""
+          },
+
+          currentDay:1,
+
+          currentTime:"20:36",
+
+          currentSceneLabel:
+            "心动小屋 · 客厅",
+
+          timeline:[
+            {
+              day:1,
+              summary:"",
+              fullNarrative:""
+            }
+          ],
+
+          stageSummaries:[],
+
+          relationships:{
+            userToChar:{},
+            charToChar:{}
+          },
+
+          privateMessages:{},
+
+          phone:{
+            weibo:[
+              {
+                author:"心动现场官方",
+                text:`《${title}》正式开机。网友已经开始猜测，本季谁会成为最受关注的嘉宾。`,
+                time:"刚刚",
+                meta:"官方账号 · 热门"
+              },
+              {
+                author:"吃瓜群众",
+                text:"这一季的嘉宾阵容看起来很有故事，先蹲一个后续。",
+                time:"今天",
+                meta:"评论 128 · 转发 46"
+              }
+            ],
+            sms:[
+              {from:"未知号码", text:"你觉得今晚谁会先主动？", time:"20:36"}
+            ],
+            notes:[
+              {title:"本季规则", text:"世界书、人设与恋综档案彼此独立。", time:"今天"}
+            ]
+          },
+
+          events:[],
+
+          lastNarrative:"",
+
+          lastQuote:"",
+
+          lastSummary:
+            "新的恋综世界刚刚开机。"
+
+        };
+
+        /*
+         * 给每个嘉宾建立独立关系档案。
+         */
+
+        picked.forEach(char => {
+
+          archive.relationships
+            .userToChar[char.characterId] = {
+
+              statusLine:
+                "你们的故事才刚刚开始。",
+
+              tags:[
+                "初次入住"
+              ],
+
+              history:[]
+
+            };
+
+        });
+
+        state.archives.unshift({
+
+          archiveId:
+            archive.archiveId,
+
+          title:
+            archive.title,
+
+          currentDay:1,
+
+          characterNames:
+            picked.map(
+              c => c.name
+            ),
+
+          characterAvatars:
+            picked.map(
+              c => c.avatar
+            ),
+
+          lastSummary:
+            archive.lastSummary,
+
+          lastSavedAt:
+            archive.lastSavedAt
+
+        });
+
+        state.currentArchive =
+          archive;
+
+        loadCurrentCharacters();
+
+        await storageSet(
+          `archive:${archive.archiveId}`,
+          archive
         );
-      });
+
+        await storageSet(
+          "archiveIndex",
+          state.archives
+        );
+
+        modal.remove();
+
+        state.activeTab =
+          "show";
+
+        state.page =
+          "tab";
+
+        toast(
+          `《${title}》已开机`
+        );
+
+        renderPage();
+
+      }
+    );
   }
 
   /* =========================================================
-     观察室切换
+     当前档案嘉宾
      ========================================================= */
 
-  function openObservationPage(
-    open = true
-  ) {
+  function loadCurrentCharacters() {
+
     if (!state.currentArchive) {
-      toast("请先创建一个恋综档案");
+
+      state.characters = [];
+
       return;
     }
 
-    if (!open) {
-      state.activeTab = "show";
-      state.currentHouseView =
-        "overview";
-      renderPage();
-      return;
-    }
+    state.characters =
+      (
+        state.currentArchive.characters ||
+        []
+      ).map(snapshot => {
 
-    state.activeTab = "show";
+        /*
+         * 优先保留档案里的快照。
+         * 这样即使 Roche 后续角色资料发生变化，
+         * 已经开始的恋综不会被偷偷改掉。
+         */
 
-    const content =
-      state.container.querySelector(
-        "[data-content]"
-      );
+        return {
 
-    if (!content) return;
+          id:
+            snapshot.characterId,
 
-    content.innerHTML =
-      renderObservationRoom();
+          name:
+            snapshot.name,
 
-    bindPageEvents();
+          handle:
+            snapshot.handle,
 
-    /*
-      观察室不是底栏。
-      也不是档案。
-      它只是节目页中的一个独立观察页面。
-    */
+          avatar:
+            snapshot.avatar,
+
+          bio:
+            snapshot.bio,
+
+          persona:
+            snapshot.personaSnapshot,
+
+          archiveSnapshot:
+            snapshot
+
+        };
+
+      });
+
   }
 
   /* =========================================================
-     Top Day
-     ========================================================= */
-
-  function updateTopDay() {
-    const el =
-      state.container.querySelector(
-        "[data-top-day]"
-      );
-
-    if (!el) return;
-
-    el.textContent =
-      `DAY ${String(
-        state.currentArchive?.currentDay ||
-        1
-      ).padStart(2, "0")}`;
-  }
-
-  /* =========================================================
-     保存当前档案
+     保存档案
      ========================================================= */
 
   async function saveCurrentArchive() {
-    if (!state.currentArchive) return;
+
+    if (!state.currentArchive)
+      return;
 
     state.currentArchive.lastSavedAt =
       Date.now();
 
+    const archive =
+      state.currentArchive;
+
     const indexEntry = {
+
       archiveId:
-        state.currentArchive.archiveId,
+        archive.archiveId,
 
       title:
-        state.currentArchive.title,
+        archive.title,
 
       currentDay:
-        state.currentArchive.currentDay,
+        archive.currentDay || 1,
 
       characterNames:
-        state.currentArchive.characters
-          .map((c) => c.name),
+        (archive.characters || [])
+          .map(c => c.name),
 
       characterAvatars:
-        state.currentArchive.characters
-          .map((c) => c.avatar),
-
-      userName:
-        state.currentArchive
-          .userPersona?.name ||
-        "",
+        (archive.characters || [])
+          .map(c => c.avatar),
 
       lastSummary:
-        state.currentArchive.lastSummary ||
-        state.currentArchive
-          .lastNarrative
-          ?.slice(0, 80) ||
+        archive.lastSummary ||
+        archive.lastNarrative?.slice(
+          0,
+          80
+        ) ||
         "暂无剧情",
 
       lastSavedAt:
-        state.currentArchive.lastSavedAt,
+        archive.lastSavedAt
+
     };
 
-    const existing =
+    const index =
       state.archives.findIndex(
-        (archive) =>
-          archive.archiveId ===
-          indexEntry.archiveId
+        a =>
+          a.archiveId ===
+          archive.archiveId
       );
 
-    if (existing >= 0) {
-      state.archives[existing] =
+    if (index >= 0) {
+
+      state.archives[index] =
         indexEntry;
+
     } else {
+
       state.archives.unshift(
         indexEntry
       );
+
     }
 
-    await safeSet(
-      `archive:${state.currentArchive.archiveId}`,
-      state.currentArchive
+    await storageSet(
+      `archive:${archive.archiveId}`,
+      archive
     );
 
-    await safeSet(
+    await storageSet(
       "archiveIndex",
       state.archives
     );
+
   }
 
   /* =========================================================
-     初始数据
+     世界书读取
+     ========================================================= */
+
+  function normalizeWorldbook(raw, index = 0, source = "roche") {
+    const name = raw?.name || raw?.title || raw?.comment || `世界书 ${index + 1}`;
+    const content = raw?.content || raw?.text || raw?.description || raw?.entries?.map(e => e?.content || e?.text || "").filter(Boolean).join("\n\n") || "";
+    return {
+      id: String(raw?.id || raw?.worldbookId || `${source}-${index}-${name}`),
+      name,
+      description: raw?.description || raw?.desc || "",
+      content,
+      source,
+      sourceLabel: source === "roche" ? "ROCHE 世界书" : "自建世界书",
+      defaultSelected: source === "custom" && raw?.defaultSelected !== false
+    };
+  }
+
+  async function loadRocheWorldbooks(roche) {
+    let list = [];
+    try {
+      const candidates = [
+        roche?.worldbook?.list,
+        roche?.worldbooks?.list,
+        roche?.worldBook?.list,
+        roche?.worldbook?.getAll,
+        roche?.worldbooks?.getAll
+      ].filter(fn => typeof fn === "function");
+
+      for (const fn of candidates) {
+        try {
+          const result = await fn.call(
+            fn === roche?.worldbook?.list || fn === roche?.worldbook?.getAll ? roche.worldbook :
+            fn === roche?.worldbooks?.list || fn === roche?.worldbooks?.getAll ? roche.worldbooks :
+            roche.worldBook
+          );
+          if (Array.isArray(result)) { list = result; break; }
+          if (Array.isArray(result?.items)) { list = result.items; break; }
+          if (Array.isArray(result?.worldbooks)) { list = result.worldbooks; break; }
+        } catch {}
+      }
+    } catch {}
+
+    state.rocheWorldbooks = list.map((item, i) => normalizeWorldbook(item, i, "roche"));
+  }
+
+  /* =========================================================
+     Roche 数据
      ========================================================= */
 
   async function loadRocheData(roche) {
 
-    await loadUserPersonas(roche);
+    /*
+     * USER
+     */
+
+    try {
+
+      state.user =
+        await roche
+          .persona
+          .getActiveUserPersona();
+
+    } catch (error) {
+
+      console.warn(
+        "[心动现场] USER读取失败",
+        error
+      );
+
+      state.user = null;
+
+    }
 
     /*
-      CHAR 只作为创建恋综时的候选池。
-      不会自动写入 currentArchive。
-    */
-    await loadCharacterPool();
+     * Roche 全角色
+     *
+     * 注意：
+     * 这里只作为“创建恋综时”的候选池。
+     * 不会直接塞进当前嘉宾。
+     */
+
+    try {
+
+      state.candidateCharacters =
+        (await roche.character.list()) ||
+        [];
+
+    } catch (error) {
+
+      console.warn(
+        "[心动现场] CHAR读取失败",
+        error
+      );
+
+      state.candidateCharacters =
+        [];
+
+    }
+
+    await loadRocheWorldbooks(roche);
+
+    state.customWorldbooks = await storageGet(
+      "customWorldbooks",
+      []
+    );
+
+    if (!state.customWorldbooks.length) {
+      state.customWorldbooks = [
+        {
+          id:"xd-default-romance-world",
+          name:"心动现场 · 恋综基础世界书",
+          description:"默认恋综规则、节目氛围与核心世界设定。可在创建恋综时直接勾选。",
+          content:"这是《心动现场》的基础世界规则。\n\n节目是一档以 USER 为唯一女嘉宾、其他角色作为男性嘉宾参与的恋爱真人秀。角色之间不会发展恋爱关系；所有情感主线只围绕 USER 展开。\n\n节目世界拥有独立的时间、地点、事件、关系、私信、观察记录与长期记忆。嘉宾会根据自身人设和当前档案规则行动。\n\n当 USER 不在场时，世界仍会继续运行，并可以通过观察室留下可被 USER 看到的片段。",
+          source:"custom",
+          sourceLabel:"心动现场内置",
+          defaultSelected:true,
+          builtin:true
+        }
+      ];
+      await storageSet("customWorldbooks", state.customWorldbooks);
+    }
 
     /*
-      世界书同理，只读取候选库。
-    */
-    await loadWorldbooks();
+     * 读取档案索引
+     */
 
     state.archives =
-      await safeGet(
+      await storageGet(
         "archiveIndex",
         []
       );
 
     /*
-      有历史档案：
-      默认打开最近一次档案。
+     * 打开最近使用的档案。
+     */
 
-      没有档案：
-      保持空壳欢迎页。
-    */
     if (state.archives.length) {
 
       const first =
         state.archives[0];
 
       state.currentArchive =
-        await safeGet(
+        await storageGet(
           `archive:${first.archiveId}`,
           first
         );
 
-      /*
-        当前 USER 应该跟随档案，
-        而不是跟随 Roche 当前 active user。
-      */
-      if (
-        state.currentArchive
-          ?.userPersona
-      ) {
-        const persona =
-          state.userPersonas.find(
-            (item) =>
-              String(
-                item.id ||
-                item.personaId
-              ) ===
-              String(
-                state.currentArchive
-                  .userPersona
-                  .personaId
-              )
-          );
+      loadCurrentCharacters();
 
-        if (persona) {
-          state.user =
-            persona;
-        }
-      }
+    } else {
+
+      state.currentArchive =
+        null;
+
+      state.characters = [];
+
     }
+
   }
 
   /* =========================================================
@@ -5805,6 +5791,7 @@
     container,
     roche
   ) {
+
     state.container =
       container;
 
@@ -5814,11 +5801,10 @@
     state.activeTab =
       "show";
 
-    state.currentHouseView =
-      "overview";
+    state.page =
+      "tab";
 
-    state.currentPhoneView =
-      "home";
+    state.stack = [];
 
     state.listeners = [];
 
@@ -5833,6 +5819,7 @@
     renderPage();
 
     updateTopDay();
+
   }
 
   /* =========================================================
@@ -5843,24 +5830,15 @@
     container
   ) {
 
-    state.listeners.forEach(
-      (cleanup) => {
-        try {
-          cleanup();
-        } catch {}
-      }
-    );
-
-    state.listeners = [];
+    clearListeners();
 
     const modal =
       container.querySelector(
         ".xd-modal-wrap"
       );
 
-    if (modal) {
+    if (modal)
       modal.remove();
-    }
 
     container.replaceChildren();
 
@@ -5869,158 +5847,70 @@
         STYLE_ID
       );
 
-    if (style) {
+    if (style)
       style.remove();
-    }
 
-    state.container =
-      null;
+    state.container = null;
 
-    state.roche =
-      null;
+    state.roche = null;
 
-    state.currentArchive =
-      null;
+    state.currentArchive = null;
 
-    state.characterPool =
-      [];
+    state.characters = [];
 
-    state.worldbooks =
-      [];
   }
 
   /* =========================================================
-     Roche Plugin
+     注册插件
      ========================================================= */
 
   window.RochePlugin.register({
 
-    id: PLUGIN_ID,
+    id:PLUGIN_ID,
 
-    name: "心动现场",
+    name:"心动现场",
 
-    version: VERSION,
+    version:"1.3.0",
 
-    apps: [
+    apps:[
+
       {
-        id: APP_ID,
 
-        name: "心动现场",
+        id:APP_ID,
 
-        icon: "heart",
+        name:"心动现场",
 
-        iconImage: "",
+        icon:"heart",
+
+        iconImage:"",
 
         async mount(
           container,
           roche
         ) {
+
           await mount(
             container,
             roche
           );
+
         },
 
         async unmount(
-          container
+          container,
+          roche
         ) {
+
           await unmount(
             container
           );
-        },
-      },
-    ],
+
+        }
+
+      }
+
+    ]
+
   });
 
 })();
-```
-
-### 这一版有一个特别重要的逻辑变化
-
-现在 **Roche 里的角色 ≠ 本季嘉宾**。
-
-启动插件时：
-
-```text
-Roche CHAR
-   ↓
-候选池
-```
-
-不会直接显示成嘉宾。
-
-只有：
-
-```text
-创建恋综
-   ↓
-选择 USER
-   ↓
-选择嘉宾
-   ↓
-选择世界书
-   ↓
-选择沉浸模式
-   ↓
-开机
-```
-
-之后：
-
-```text
-本季档案
-   ↓
-本季嘉宾
-   ↓
-嘉宾页面
-   ↓
-关系 / 私信 / 剧情
-```
-
-这样不同恋综之间才真正隔离。
-
-### 小屋和今日玩法也已经拆开
-
-现在不是：
-
-> 点小屋 → 看三个小游戏
-
-而是：
-
-**心动小屋 = 世界地图**
-
-```text
-🏠 心动小屋
-
-🛋 客厅
-🍳 厨房
-🌿 花园
-♡ 房间
-☾ 阳台
-```
-
-而：
-
-**今日玩法 = 节目组今天安排的事件**
-
-例如：
-
-```text
-今日玩法
-
-🍳 厨房挑战
-💗 心动问答
-🌿 花园偶遇
-```
-
-点「厨房挑战」以后，会直接把当前场景切到：
-
-```text
-心动小屋 · 厨房
-```
-
-所以以后真正接 AI 剧情时，**事件产生的结果可以同时改变小屋状态、角色关系、观察室、手机动态、微博和私信**，而不是每个功能各玩各的。
-
-另外我特意没有给嘉宾页面加新的底栏，也没有重新设计它；**它仍然是你现在喜欢的那一版。**
-
-这一版先把我们确定的架构和 UI 统一起来，后面再接真正的 AI 剧情引擎，会比现在直接往三个按钮里塞 AI 稳很多。
