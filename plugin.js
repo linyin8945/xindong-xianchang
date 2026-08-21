@@ -1,4 +1,4 @@
-/* 《心动现场》 v2.0.0
+/* 《心动现场》 v2.0.1
  * 作者：linyin8945
  *
  * 本版：
@@ -15,6 +15,12 @@
  * - 世界书库：Roche 世界书 + 插件自建世界书
  * - 创建恋综时可勾选多个世界书
  * - 心动小屋地图
+ * - 节目化流程：主持人→USER自我介绍→嘉宾逐位入场→比赛→投票→约会→小屋自由活动
+ * - 小屋地点随机AI事件 + 三选一 + 结果回写
+ * - 顶部直播弹幕，仅显示2-3条并自动滚动
+ * - 微博顶部分类切换 + 同人生成设定选择
+ * - 节目生成锁与全屏生成动画
+ * - 嘉宾底栏入口、User短信联系人点击修复
  * - 玩法入口
  * - 档案彼此独立
  */
@@ -56,6 +62,12 @@
     detailCharacter: null,
     detailExpanded: false,
     chatCharacter: null,
+    generating: false,
+    fanficDraft: {
+      genres: ["青春校园"],
+      characterIds: [],
+      linkReality: true
+    },
 
     listeners: []
   };
@@ -179,6 +191,90 @@
     return aiText(prompt, { maxTokens: 1200, temperature:0.8 });
   }
 
+  function parseLooseJSON(text, fallback) {
+    try {
+      return JSON.parse(text);
+    } catch {}
+    const match = String(text || "").match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch {}
+    }
+    const arr = String(text || "").match(/\[[\s\S]*\]/);
+    if (arr) {
+      try { return JSON.parse(arr[0]); } catch {}
+    }
+    return fallback;
+  }
+
+  async function generateAIIntroCards(archive) {
+    const ctx = buildAIContext(archive);
+    const prompt = `你是恋综《心动现场》的节目导演。请把第一天开场设计成真人恋综节目卡片，不是小说。
+主持人只负责欢迎、宣布开机和简单说明规则。
+USER必须自己进行自我介绍。
+每位嘉宾也必须自己进行自我介绍，必须符合各自人设。
+请严格只输出JSON，不要Markdown：
+{"host":"主持人欢迎词","userPrompt":"给USER的自我介绍提示","guests":[{"characterId":"角色ID","name":"角色名","intro":"角色本人说的自我介绍"}],"taskTease":"主持人引出第一天任务的一句话"}
+USER：${JSON.stringify(ctx.user)}
+嘉宾：${JSON.stringify(ctx.characters)}
+世界书：${ctx.worldbooks}
+过去记忆：${ctx.memories}
+本季氛围：${archive.seasonConfig?.tone || "温柔、暧昧、轻微修罗场"}。`;
+    const text = await aiText(prompt, { maxTokens: 1600, temperature:0.8 });
+    const fallback = {
+      host: "欢迎来到《心动现场》。从现在开始，镜头会记录每一次靠近、犹豫和心动。",
+      userPrompt: "轮到你了。请用自己的方式告诉大家，你是谁，以及你为什么来到这里。",
+      guests: (archive.characters || []).map(c => ({
+        characterId: c.characterId || c.id,
+        name: c.name,
+        intro: c.bio || c.persona || `大家好，我是${c.name}。很高兴认识大家。`
+      })),
+      taskTease: "接下来，第一天的心动争夺战正式开始。"
+    };
+    const data = parseLooseJSON(text, fallback);
+    if (!Array.isArray(data.guests)) data.guests = fallback.guests;
+    return data;
+  }
+
+  async function generateAIHouseEvent(archive, room) {
+    const names = { kitchen:"厨房", living:"客厅", bath:"卫生间", bedroom:"卧室", garden:"花园" };
+    const ctx = buildAIContext(archive);
+    const prompt = `你是《心动现场》的夜间自由活动导演。
+地点：${names[room] || room}
+请随机生成一个发生在这个地点的恋综事件。事件必须符合角色人设，所有恋爱线围绕USER，嘉宾之间可以竞争、友情、合作、吃醋，但不能发展同性恋爱。
+请严格只输出JSON，不要Markdown：
+{"title":"事件标题","scene":"80-180字现场描述","options":[{"label":"选项A","text":"玩家选择后的行动"},{"label":"选项B","text":"玩家选择后的行动"},{"label":"选项C","text":"玩家选择后的行动"}]}
+USER：${JSON.stringify(ctx.user)}
+嘉宾：${JSON.stringify(ctx.characters)}
+关系：${JSON.stringify(archive.relationships || {})}
+世界书：${ctx.worldbooks}
+记忆：${ctx.memories}
+最近事件：${JSON.stringify((archive.events || []).slice(-8))}`;
+    const text = await aiText(prompt, { maxTokens:1200, temperature:1.0 });
+    const fallbackChar = (archive.characters || [])[Math.floor(Math.random() * Math.max(archive.characters?.length || 1, 1))];
+    return parseLooseJSON(text, {
+      title: `${names[room] || "小屋"}里的意外偶遇`,
+      scene: fallbackChar ? `${fallbackChar.name}正在这里做自己的事。你刚走近，气氛忽然安静了一瞬间，像是有人在等你先开口。` : "你走进这个地点，发现这里似乎刚刚有人来过。",
+      options: [
+        {label:"主动靠近", text:"走过去和他打招呼。"},
+        {label:"先观察", text:"不急着开口，先看看现场。"},
+        {label:"换个地方", text:"暂时离开，把这个瞬间留给之后。"}
+      ]
+    });
+  }
+
+  async function generateAIHouseOutcome(archive, event, option) {
+    const ctx = buildAIContext(archive);
+    const prompt = `你是《心动现场》的剧情引擎。玩家在小屋自由活动中选择了一个选项。
+事件：${JSON.stringify(event)}
+玩家选择：${JSON.stringify(option)}
+请生成80-180字的后续结果，必须符合人设，并明确表现至少一个角色对USER的情绪或态度变化。不要Markdown。
+USER：${JSON.stringify(ctx.user)}
+嘉宾：${JSON.stringify(ctx.characters)}
+关系：${JSON.stringify(archive.relationships || {})}
+记忆：${ctx.memories}`;
+    return aiText(prompt, { maxTokens:600, temperature:0.9 });
+  }
+
   async function generateAIDanmu(archive, topic) {
     const prompt = `为恋综《心动现场》生成20条观众实时弹幕。\n当前环节：${topic}\n嘉宾：${(archive.characters || []).map(c => c.name).join("、")}\n要求：短句、像直播弹幕，有夸奖、吐槽、猜测、CP感、竞争感，但不要让所有人都喜欢同一个角色。每行一条，不要编号，不要 Markdown。`;
     const text = await aiText(prompt, { maxTokens:800, temperature:1.0 });
@@ -191,8 +287,18 @@
     return aiText(prompt, { maxTokens:1100, temperature:0.9 });
   }
 
-  async function generateAIFanficTitles(archive) {
-    const prompt = `请为《心动现场》生成5个同人文选题卡。\nUSER设定：${JSON.stringify(archive.userPersona || {})}\n嘉宾：${JSON.stringify(archive.characters || [])}\n恋综经历：${JSON.stringify((archive.events || []).slice(-12))}\n要求每行格式：标题 | 标签1·标签2·标签3 | 一句话简介。可以包含青春校园、古代架空、ABO、末日求生、娱乐圈、豪门、职场、赛博都市、奇幻魔法、民国、悬疑推理、无限流、末世校园、神话传说等设定。`;
+  async function generateAIFanficTitles(archive, options = {}) {
+    const selectedIds = options.characterIds?.length ? options.characterIds : (archive.characters || []).map(c => c.characterId || c.id);
+    const selectedCharacters = (archive.characters || []).filter(c => selectedIds.map(String).includes(String(c.characterId || c.id)));
+    const genres = options.genres?.length ? options.genres : ["青春校园"];
+    const prompt = `请为《心动现场》生成5个同人文选题卡。
+USER设定：${JSON.stringify(archive.userPersona || {})}
+参与角色：${JSON.stringify(selectedCharacters)}
+世界类型：${JSON.stringify(genres)}
+是否关联恋综经历：是
+恋综经历：${JSON.stringify((archive.events || []).slice(-12))}
+要求每行格式：标题 | 标签1·标签2·标签3 | 一句话简介。
+所有标题必须符合选中的世界类型，并遵守角色人设；可以同时出现多个选中的角色与USER。`;
     const text = await aiText(prompt, { maxTokens:900, temperature:1.0 });
     return text.split(/\n+/).map(line => {
       const parts = line.split("|").map(x => x.trim());
@@ -202,7 +308,19 @@
 
   async function generateAIFanficFull(archive, card) {
     const ctx = buildAIContext(archive);
-    const prompt = `请完整创作一篇同人文。\n标题：${card.title}\n标签：${card.tags}\n简介：${card.intro}\nUSER：${JSON.stringify(ctx.user)}\n嘉宾：${JSON.stringify(ctx.characters)}\n恋综经历：${JSON.stringify((archive.events || []).slice(-20))}\n世界书：${ctx.worldbooks}\n要求：人物行为必须遵守人设；如果关联恋综经历，要自然引用节目中已经发生的事件；正文有完整情节、对话和结尾，约1500-2500字中文。`;
+    const selectedIds = state.fanficDraft.characterIds?.length ? state.fanficDraft.characterIds : (archive.characters || []).map(c => c.characterId || c.id);
+    const selectedCharacters = (archive.characters || []).filter(c => selectedIds.map(String).includes(String(c.characterId || c.id)));
+    const prompt = `请完整创作一篇同人文。
+标题：${card.title}
+标签：${card.tags}
+简介：${card.intro}
+USER：${JSON.stringify(ctx.user)}
+指定参与角色：${JSON.stringify(selectedCharacters)}
+选中的世界类型：${JSON.stringify(state.fanficDraft.genres || [])}
+关联本季恋综经历：是
+恋综经历：${JSON.stringify((archive.events || []).slice(-20))}
+世界书：${ctx.worldbooks}
+要求：人物行为必须遵守人设；自然引用节目中已经发生的事件；正文有完整情节、对话和结尾，约1500-2500字中文。`;
     return aiText(prompt, { maxTokens:3500, temperature:0.95 });
   }
 
@@ -2450,25 +2568,205 @@
       .xd-char-phone-label { font-size:10px; font-weight:760; }
 
       /* =====================================================
+         V2.0.1：节目化 UI / 全屏 / 小屋事件 / 微博
+         ===================================================== */
+
+      .roche-plugin-xindong-xianchang {
+        width:100% !important;
+        min-height:100% !important;
+        background:linear-gradient(180deg,#faf2f3 0%,#f7ebed 100%);
+        overflow:hidden;
+      }
+
+      .xd-topbar,
+      .xd-bottom {
+        background:rgba(250,242,243,.72) !important;
+        border-color:rgba(184,135,145,.10) !important;
+      }
+
+      .xd-bottom {
+        pointer-events:auto !important;
+        isolation:isolate;
+      }
+
+      .xd-tab {
+        position:relative;
+        z-index:3;
+        pointer-events:auto !important;
+        touch-action:manipulation;
+      }
+
+      .xd-content {
+        z-index:1;
+      }
+
+      .xd-recording-hero {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:12px;
+        padding:18px 16px;
+        border-radius:24px;
+        background:linear-gradient(135deg,rgba(255,255,255,.88),rgba(249,226,231,.72));
+        border:1px solid rgba(184,135,145,.12);
+        box-shadow:0 12px 30px rgba(113,79,87,.06);
+      }
+      .xd-recording-title { margin-top:4px; font-size:19px; font-weight:850; letter-spacing:-.03em; }
+      .xd-recording-sub { margin-top:5px; font-size:9px; color:#9b8b8f; }
+      .xd-recording-status {
+        flex:0 0 auto; padding:7px 10px; border-radius:999px;
+        background:rgba(255,255,255,.75); color:#9b6873; font-size:8px; font-weight:800;
+      }
+
+      .xd-program-card,
+      .xd-intro-card,
+      .xd-task-card,
+      .xd-date-card,
+      .xd-free-card {
+        padding:22px 18px;
+        border-radius:26px;
+        background:rgba(255,255,255,.82);
+        border:1px solid rgba(184,135,145,.13);
+        box-shadow:0 14px 34px rgba(113,79,87,.06);
+      }
+
+      .xd-program-opening { text-align:center; padding:30px 20px; }
+      .xd-program-kicker { font-size:9px; letter-spacing:.16em; color:#b17a85; font-weight:800; }
+      .xd-program-title { margin-top:8px; font-size:21px; font-weight:850; letter-spacing:-.03em; color:#43383a; }
+      .xd-program-host { margin-top:10px; font-size:11px; line-height:1.75; color:#827477; }
+      .xd-stage-label { font-size:8px; letter-spacing:.14em; color:#b17a85; font-weight:850; }
+      .xd-host-avatar,
+      .xd-intro-avatar {
+        width:70px; height:70px; margin:18px auto 12px;
+        border-radius:22px; display:grid; place-items:center;
+        background:#f3e1e4; color:#ad7b85; font-size:30px;
+        overflow:hidden; border:1px solid rgba(184,135,145,.12);
+      }
+      .xd-intro-avatar img { width:100%; height:100%; object-fit:cover; }
+      .xd-intro-speaker { text-align:center; font-size:20px; font-weight:850; color:#43383a; }
+      .xd-intro-text { margin-top:16px; padding:15px 14px; border-radius:18px; background:#fbf2f3; color:#514649; font-size:13px; line-height:1.85; text-align:center; }
+      .xd-user-intro-card .xd-intro-text { background:#f5e3e7; }
+      .xd-intro-card .xd-primary { width:100%; margin-top:16px; }
+
+      .xd-task-title { margin-top:6px; font-size:21px; font-weight:850; letter-spacing:-.03em; }
+      .xd-task-sub { margin-top:8px; font-size:11px; line-height:1.7; color:#817376; }
+      .xd-contestants { margin-top:16px; display:grid; gap:8px; }
+      .xd-contestant {
+        display:flex; align-items:center; gap:10px; padding:10px; border-radius:18px;
+        background:#fcf7f7; border:1px solid rgba(184,135,145,.10);
+      }
+      .xd-contestant-avatar { width:42px; height:42px; border-radius:14px; background:#f1e2e4; overflow:hidden; display:grid; place-items:center; color:#a97983; font-weight:800; flex:0 0 42px; }
+      .xd-contestant-avatar img { width:100%; height:100%; object-fit:cover; }
+      .xd-contestant-main { min-width:0; flex:1; }
+      .xd-contestant-name { font-size:11px; font-weight:820; }
+      .xd-contestant-desc { margin-top:3px; font-size:9px; color:#95878a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+      .xd-contestant-status { font-size:8px; color:#b17a85; }
+      .xd-program-result { margin-top:14px; padding:12px; border-radius:18px; background:#faf0f2; font-size:10px; line-height:1.7; color:#63575a; }
+      .xd-scene-short { margin-top:7px; }
+
+      .xd-vote-live { margin-top:0; }
+      .xd-vote-winner { margin-top:14px; padding:12px; border-radius:16px; background:#f5e3e7; color:#8c616b; font-size:11px; font-weight:800; }
+      .xd-date-title { margin-top:7px; font-size:20px; line-height:1.45; font-weight:850; }
+      .xd-date-options { display:grid; gap:9px; margin-top:16px; }
+      .xd-date-option {
+        display:grid; grid-template-columns:38px 1fr; column-gap:10px; align-items:center;
+        width:100%; padding:12px; text-align:left; border-radius:18px;
+        border:1px solid rgba(184,135,145,.12); background:#fcf7f7; cursor:pointer;
+      }
+      .xd-date-option.active { background:#f5e3e7; border-color:rgba(184,135,145,.32); }
+      .xd-date-option span { grid-row:1 / span 2; width:38px; height:38px; border-radius:13px; display:grid; place-items:center; background:#f2e0e3; font-size:19px; }
+      .xd-date-option b { font-size:11px; }
+      .xd-date-option small { margin-top:3px; font-size:8px; color:#95878a; }
+
+      .xd-danmu-overlay {
+        position:fixed;
+        left:0; right:0;
+        top:92px;
+        height:145px;
+        pointer-events:none;
+        z-index:12;
+        overflow:hidden;
+      }
+      .xd-danmu-overlay.is-off { display:none; }
+      .xd-danmu-tv-line {
+        position:absolute; left:100%;
+        white-space:nowrap;
+        padding:5px 10px;
+        border-radius:999px;
+        background:rgba(255,255,255,.78);
+        border:1px solid rgba(255,255,255,.72);
+        color:#66595c;
+        font-size:10px;
+        box-shadow:0 4px 16px rgba(85,62,68,.05);
+        animation:xdTVDanmu 12s linear infinite;
+      }
+      .xd-danmu-tv-line.line-0 { top:12px; animation-duration:13s; }
+      .xd-danmu-tv-line.line-1 { top:54px; animation-duration:16s; animation-delay:-4s; }
+      .xd-danmu-tv-line.line-2 { top:96px; animation-duration:14s; animation-delay:-8s; }
+      @keyframes xdTVDanmu { from { transform:translateX(0); } to { transform:translateX(-160vw); } }
+
+      .xd-house-event-scene { margin-top:14px; padding:13px; border-radius:18px; background:#fbf1f3; color:#5c5053; font-size:12px; line-height:1.8; }
+      .xd-house-event-options { display:grid; gap:8px; margin-top:12px; }
+      .xd-house-option { display:flex; align-items:flex-start; gap:10px; padding:11px; text-align:left; border:1px solid rgba(184,135,145,.12); border-radius:17px; background:#fffafa; cursor:pointer; }
+      .xd-house-option > span { width:25px; height:25px; flex:0 0 25px; display:grid; place-items:center; border-radius:50%; background:#f2dfe3; color:#9e6b76; font-size:9px; font-weight:850; }
+      .xd-house-option b { display:block; font-size:11px; }
+      .xd-house-option small { display:block; margin-top:3px; font-size:8px; line-height:1.5; color:#94868a; }
+
+      .xd-weibo-tabs { position:sticky; top:0; z-index:5; display:flex; gap:7px; overflow:auto; padding:4px 0 10px; background:linear-gradient(#faf2f3 80%,rgba(250,242,243,0)); }
+      .xd-weibo-tabs button { flex:0 0 auto; border:0; border-radius:999px; padding:8px 12px; background:rgba(255,255,255,.64); color:#9a8b8e; font-size:9px; cursor:pointer; }
+      .xd-weibo-tabs button.active { background:#ead0d5; color:#805b65; font-weight:800; }
+      .xd-weibo-category-title { margin:6px 0 10px; font-size:19px; font-weight:850; }
+      .xd-setting-label { margin:14px 0 7px; font-size:9px; color:#9b8b8f; font-weight:800; }
+      .xd-chip-grid { display:flex; flex-wrap:wrap; gap:7px; }
+      .xd-setting-chip { border:1px solid rgba(184,135,145,.14); border-radius:999px; padding:7px 10px; background:#fbf5f6; color:#88797c; font-size:9px; cursor:pointer; }
+      .xd-setting-chip.active { background:#e8c8ce; color:#7c5962; border-color:#d9aeb7; font-weight:800; }
+      .xd-setting-fixed { margin-top:14px; padding:10px 11px; border-radius:14px; background:#f7e8eb; color:#8d6870; font-size:9px; }
+
+      .xd-generating-overlay {
+        position:absolute;
+        inset:0;
+        z-index:9999;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        background:rgba(248,237,239,.72);
+        backdrop-filter:blur(9px);
+        -webkit-backdrop-filter:blur(9px);
+      }
+      .xd-generating-card {
+        width:min(310px,calc(100% - 42px));
+        padding:28px 22px;
+        border-radius:28px;
+        background:rgba(255,255,255,.90);
+        border:1px solid rgba(184,135,145,.16);
+        box-shadow:0 20px 60px rgba(94,68,75,.13);
+        text-align:center;
+      }
+      .xd-generating-orbit { position:relative; width:52px; height:52px; margin:0 auto 15px; border:2px solid #e7c5cb; border-top-color:#b88791; border-radius:50%; animation:xdSpin 1.1s linear infinite; }
+      .xd-generating-orbit i { position:absolute; width:7px; height:7px; border-radius:50%; background:#dcaeb8; }
+      .xd-generating-orbit i:nth-child(1){left:8px;top:9px;}
+      .xd-generating-orbit i:nth-child(2){right:5px;top:19px;}
+      .xd-generating-orbit i:nth-child(3){left:22px;bottom:3px;}
+      @keyframes xdSpin { to { transform:rotate(360deg); } }
+      .xd-generating-title { font-size:15px; font-weight:850; color:#4b3e41; }
+      .xd-generating-sub { margin-top:7px; font-size:9px; line-height:1.7; color:#95878a; }
+      .xd-generating-dots { margin-top:12px; display:flex; justify-content:center; gap:5px; }
+      .xd-generating-dots span { width:5px; height:5px; border-radius:50%; background:#c89aa4; animation:xdDot 1s infinite alternate; }
+      .xd-generating-dots span:nth-child(2){animation-delay:.18s}.xd-generating-dots span:nth-child(3){animation-delay:.36s}
+      @keyframes xdDot { from{opacity:.25;transform:translateY(0)} to{opacity:1;transform:translateY(-3px)} }
+
+      /* =====================================================
          桌面
          ===================================================== */
 
       @media (min-width:700px) {
-
         .roche-plugin-xindong-xianchang {
-          max-width:520px;
-
-          margin:0 auto;
-
-          border-left:
-            1px solid
-            rgba(120,90,96,.08);
-
-          border-right:
-            1px solid
-            rgba(120,90,96,.08);
+          max-width:none;
+          width:100%;
+          margin:0;
+          border-left:0;
+          border-right:0;
         }
-
       }
     `;
 
@@ -2717,292 +3015,147 @@
      ========================================================= */
 
   function renderShow() {
-
-    const archive =
-      state.currentArchive;
-
-    const day =
-      archive?.currentDay || 1;
-
-    const scene =
-      archive?.currentSceneLabel ||
-      "心动小屋 · 客厅";
-
-    const narrative =
-      archive?.lastNarrative ||
-      "夕阳落进客厅的玻璃窗。节目组没有宣布新的任务，空气却比往常安静了一些。几个人各自做着手里的事，偶尔的目光交错，让今晚显得格外微妙。";
-
-    const quote =
-      archive?.lastQuote ||
-      "“你今天……好像一直在看我。”";
+    const archive = state.currentArchive;
+    const day = archive?.currentDay || 1;
 
     if (!archive) {
-
       return `
         <div class="xd-page">
-
-          ${pageHead(
-            "TONIGHT · LIVE",
-            "心动现场",
-            "还没有正在进行的恋综"
-          )}
-
+          ${pageHead("TONIGHT · LIVE","心动现场","还没有正在进行的恋综")}
           <section class="xd-hero">
-
-            <div class="xd-kicker">
-              READY TO START
-            </div>
-
-            <div class="xd-hero-title">
-              开始一场新的心动。
-            </div>
-
-            <div class="xd-hero-sub">
-              先创建属于你的恋综世界，
-              再选择本季入住的嘉宾。
-              Roche 中的其他角色不会自动进入节目。
-            </div>
-
-            <button
-              class="xd-primary"
-              data-new-archive
-            >
-              ＋ 创建新的恋综
-            </button>
-
+            <div class="xd-kicker">READY TO START</div>
+            <div class="xd-hero-title">开始一场新的心动。</div>
+            <div class="xd-hero-sub">先创建属于你的恋综世界，再选择本季入住的嘉宾。Roche 中的其他角色不会自动进入节目。</div>
+            <button class="xd-primary" data-new-archive>＋ 创建新的恋综</button>
           </section>
+        </div>`;
+    }
 
-          <div class="xd-section-head">
-            <div class="xd-section-title">
-              你会遇见什么？
-            </div>
+    const stage = archive.stage || "intro";
+    const intro = archive.ai?.introCards;
+    const introIndex = archive.ai?.introIndex || 0;
+    const currentGuestIntro = intro?.guests?.[Math.max(0, introIndex - 2)];
+    const stageNames = {
+      intro:"嘉宾入场", task:"心动争夺战", vote:"观众投票",
+      date:"心动约会", free:"夜间自由活动", dayEnd:"今日录制结束"
+    };
+    let mainContent = "";
+
+    if (stage === "intro") {
+      if (!intro) {
+        mainContent = `
+          <section class="xd-program-card xd-program-opening">
+            <div class="xd-program-kicker">OPENING</div>
+            <div class="xd-program-title">今天，心动现场正式开机。</div>
+            <div class="xd-program-host">主持人、USER和嘉宾将依次入场。每个人都会用自己的方式介绍自己。</div>
+            <button class="xd-primary" data-start-show>开始今日录制</button>
+          </section>`;
+      } else if (introIndex === 0) {
+        mainContent = `
+          <section class="xd-intro-card">
+            <div class="xd-stage-label">主持人 · LIVE</div>
+            <div class="xd-host-avatar">♡</div>
+            <div class="xd-intro-speaker">主持人</div>
+            <div class="xd-intro-text">${esc(intro.host)}</div>
+            <button class="xd-primary" data-intro-next>进入自我介绍</button>
+          </section>`;
+      } else if (introIndex === 1) {
+        mainContent = `
+          <section class="xd-intro-card xd-user-intro-card">
+            <div class="xd-stage-label">USER · YOUR TURN</div>
+            <div class="xd-intro-speaker">现在轮到你。</div>
+            <div class="xd-intro-text">${esc(intro.userPrompt || "请用自己的方式介绍一下自己。")}</div>
+            <button class="xd-primary" data-intro-next>完成我的自我介绍</button>
+          </section>`;
+      } else if (currentGuestIntro) {
+        const guest = (archive.characters || []).find(c => String(c.characterId || c.id) === String(currentGuestIntro.characterId)) || currentGuestIntro;
+        const guestNo = introIndex - 1;
+        mainContent = `
+          <section class="xd-intro-card">
+            <div class="xd-stage-label">嘉宾 ${guestNo} · LIVE</div>
+            ${avatarHTML(guest, "xd-intro-avatar")}
+            <div class="xd-intro-speaker">${esc(guest.name || currentGuestIntro.name)}</div>
+            <div class="xd-intro-text">${esc(currentGuestIntro.intro || guest.bio || guest.persona || "")}</div>
+            <button class="xd-primary" data-intro-next>${guestNo >= (intro.guests?.length || 0) ? "进入第一天任务" : "下一位嘉宾"}</button>
+          </section>`;
+      }
+    } else if (stage === "task") {
+      mainContent = `
+        <section class="xd-task-card">
+          <div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · CHALLENGE</div>
+          <div class="xd-task-title">心动争夺战</div>
+          <div class="xd-task-sub">每位嘉宾独自完成最符合自己人设的挑战。厨艺、画画、唱歌……今晚的约会机会只有一个。</div>
+          <div class="xd-contestants">
+            ${(archive.characters || []).map((c,i)=>`
+              <article class="xd-contestant">
+                ${avatarHTML(c,"xd-contestant-avatar")}
+                <div class="xd-contestant-main"><div class="xd-contestant-name">${esc(c.name)}</div><div class="xd-contestant-desc">${esc(c.bio || c.persona || "正在准备自己的挑战。").slice(0,70)}</div></div>
+                <div class="xd-contestant-status">${["准备中","挑战中","等待评分"][i % 3]}</div>
+              </article>`).join("")}
           </div>
-
-          <div class="xd-play-grid">
-
-            <button
-              class="xd-play-card"
-              data-open-house
-            >
-              <div class="xd-play-icon">
-                🏠
-              </div>
-
-              <div class="xd-play-title">
-                心动小屋
-              </div>
-
-              <div class="xd-play-desc">
-                探索不同地点与互动玩法
-              </div>
-            </button>
-
-            <button
-              class="xd-play-card"
-              data-open-observe
-            >
-              <div class="xd-play-icon">
-                👀
-              </div>
-
-              <div class="xd-play-title">
-                观察室
-              </div>
-
-              <div class="xd-play-desc">
-                偷看你不在场时发生的事情
-              </div>
-            </button>
-
+          <button class="xd-primary" data-start-show>开始比赛</button>
+          ${archive.ai?.lastEvent ? `<div class="xd-program-result"><div class="xd-stage-label">节目片段</div><div class="xd-scene-short">${esc(archive.ai.lastEvent)}</div></div>` : ""}
+        </section>`;
+    } else if (stage === "vote") {
+      mainContent = `
+        <section class="xd-vote-card xd-vote-live">
+          <div class="xd-stage-label">LIVE VOTE · 观众投票</div>
+          <div class="xd-task-title">${esc(archive.vote?.title || "第一天心动争夺战")}</div>
+          ${(archive.vote?.results || []).map(r=>`<div class="xd-vote-row"><div class="xd-vote-name">${esc(r.name)}</div><div class="xd-vote-bar"><div class="xd-vote-fill" style="width:${Math.round(r.score || 0)}%"></div></div><div class="xd-vote-num">${Math.round(r.score || 0)}%</div></div>`).join("")}
+          <div class="xd-vote-winner">${archive.vote?.winner ? `今晚的约会资格：${esc(archive.vote.winner)}` : "等待投票结果"}</div>
+          <button class="xd-primary" data-start-show>进入心动约会</button>
+        </section>`;
+    } else if (stage === "date") {
+      const winner = archive.vote?.winner || "心动嘉宾";
+      mainContent = `
+        <section class="xd-date-card">
+          <div class="xd-stage-label">DATE · TONIGHT</div>
+          <div class="xd-date-title">今晚，${esc(winner)}获得与你单独约会的机会。</div>
+          <div class="xd-date-options">
+            ${(archive.ai?.datePlaces || ["一起做晚餐","去海边散步","去城市里看夜景"]).map((x,i)=>`
+              <button class="xd-date-option ${archive.ai?.selectedDatePlace === x ? "active" : ""}" data-date-option="${i}">
+                <span>${["🍳","🌊","🌃"][i] || "♡"}</span><b>${esc(x)}</b><small>选择后，AI会根据TA的人设展开约会</small>
+              </button>`).join("")}
           </div>
-
-        </div>
-      `;
+          <button class="xd-primary" data-start-show style="margin-top:14px;">开始约会</button>
+        </section>`;
+    } else if (stage === "free") {
+      mainContent = `
+        <section class="xd-free-card">
+          <div class="xd-stage-label">NIGHT · FREE TIME</div>
+          <div class="xd-task-title">晚上的时间，交给你。</div>
+          <div class="xd-task-sub">进入心动小屋，点击地点触发随机事件。你可以自己决定今晚要靠近谁。</div>
+          <button class="xd-primary" data-open-house>进入心动小屋</button>
+        </section>`;
+    } else {
+      mainContent = `
+        <section class="xd-program-card">
+          <div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · END</div>
+          <div class="xd-program-title">今天的录制结束了。</div>
+          <div class="xd-program-host">角色手机、动态、日记、成就与节目舆论已经更新。</div>
+          <button class="xd-primary" data-start-show>开始下一天</button>
+        </section>`;
     }
 
     return `
       <div class="xd-page">
-
-        ${pageHead(
-          "TONIGHT · LIVE",
-          "正在播出",
-          "实时节目现场"
-        )}
-
-        <section class="xd-hero">
-
-          <div class="xd-kicker">
-            EPISODE
-            ${String(day).padStart(2, "0")}
+        <section class="xd-recording-hero">
+          <div>
+            <div class="xd-kicker">TODAY'S RECORDING</div>
+            <div class="xd-recording-title">DAY ${String(day).padStart(2,"0")} · ${esc(stageNames[stage] || "LIVE")}</div>
+            <div class="xd-recording-sub">${esc(archive.title)} · ${stage === "free" ? "夜间自由活动" : "节目正在进行"}</div>
           </div>
-
-          <div class="xd-hero-title">
-            ${esc(archive.title)}
-          </div>
-
-          <div class="xd-hero-sub">
-            一场关于靠近、试探与心动的真人秀。
-            没有人知道下一秒谁会先动心。
-          </div>
-
-          <div class="xd-live">
-            <span class="xd-live-dot"></span>
-            LIVE · ${esc(scene)}
-          </div>
-
+          <div class="xd-recording-status"><span class="xd-live-dot"></span> LIVE</div>
         </section>
-
         <div class="xd-v2-toolbar">
-          <span class="xd-ai-badge">✦ AI 剧情引擎已接入</span>
-          <button class="xd-danmu-toggle ${archive.danmuEnabled !== false ? "on" : ""}" data-danmu-toggle>
-            💬 弹幕 <span class="xd-danmu-toggle-track"></span>
-          </button>
+          <span class="xd-ai-badge">✦ AI 剧情引擎</span>
+          <button class="xd-danmu-toggle ${archive.danmuEnabled !== false ? "on" : ""}" data-danmu-toggle>💬 弹幕 <span class="xd-danmu-toggle-track"></span></button>
         </div>
-
-        <div class="xd-section-head">
-
-          <div class="xd-section-title">
-            今晚的现场
-          </div>
-
-          <div class="xd-section-note">
-            DAY
-            ${String(day).padStart(2, "0")}
-            ·
-            ${esc(
-              archive.currentTime ||
-              "20:36"
-            )}
-          </div>
-
+        ${mainContent}
+        <div class="xd-danmu-overlay ${archive.danmuEnabled !== false ? "" : "is-off"}">
+          ${(archive.danmu || []).filter(Boolean).slice(0,3).map((d,i)=>`<span class="xd-danmu-tv-line line-${i}">${esc(d)}</span>`).join("")}
         </div>
-
-        <section class="xd-scene">
-
-          <div class="xd-scene-label">
-            ${esc(scene)}
-          </div>
-
-          <div class="xd-narrative">
-            ${esc(narrative)}
-          </div>
-
-          <div class="xd-quote">
-            ${esc(quote)}
-          </div>
-
-        </section>
-
-        <!-- 房屋入口 -->
-
-        <div class="xd-section-head">
-
-          <div class="xd-section-title">
-            心动小屋
-          </div>
-
-          <div class="xd-section-note">
-            EXPLORE
-          </div>
-
-        </div>
-
-        <div class="xd-play-grid">
-
-          <button
-            class="xd-play-card"
-            data-open-house
-          >
-
-            <div class="xd-play-icon">
-              🏠
-            </div>
-
-            <div class="xd-play-title">
-              进入心动小屋
-            </div>
-
-            <div class="xd-play-desc">
-              自由选择地点与节目玩法
-            </div>
-
-          </button>
-
-          <button
-            class="xd-play-card"
-            data-open-observe
-          >
-
-            <div class="xd-play-icon">
-              👀
-            </div>
-
-            <div class="xd-play-title">
-              观察室
-            </div>
-
-            <div class="xd-play-desc">
-              看看你不在的时候发生了什么
-            </div>
-
-          </button>
-
-        </div>
-
-        <!-- 今日玩法 -->
-
-        <div class="xd-section-head">
-
-          <div class="xd-section-title">
-            今日玩法
-          </div>
-
-          <div class="xd-section-note">
-            TODAY
-          </div>
-
-        </div>
-
-        <div class="xd-play-grid">
-          <button class="xd-play-card" data-start-show>
-            <div class="xd-play-icon">🎬</div>
-            <div class="xd-play-title">${archive.stage === "intro" ? "开始第一天节目" : "继续今日玩法"}</div>
-            <div class="xd-play-desc">主持人、嘉宾介绍、任务竞争与观众投票会从这里继续。</div>
-          </button>
-          <button class="xd-play-card" data-ai-event="心动小屋夜间自由活动">
-            <div class="xd-play-icon">✨</div>
-            <div class="xd-play-title">AI 触发事件</div>
-            <div class="xd-play-desc">根据人设、关系、记忆和当前地点生成一次新事件。</div>
-          </button>
-        </div>
-
-        ${archive.vote ? `
-          <div class="xd-section-head"><div class="xd-section-title">观众投票</div><div class="xd-section-note">FINAL RESULT</div></div>
-          <section class="xd-vote-card">
-            <div style="font-size:12px;font-weight:800;">${esc(archive.vote.title || "今日心动投票")}</div>
-            ${(archive.vote.results || []).map(r => `<div class="xd-vote-row"><div class="xd-vote-name">${esc(r.name)}</div><div class="xd-vote-bar"><div class="xd-vote-fill" style="width:${Math.round(r.score || 0)}%"></div></div><div class="xd-vote-num">${Math.round(r.score || 0)}%</div></div>`).join("")}
-            ${archive.vote.winner ? `<div style="margin-top:14px;padding:10px 12px;border-radius:15px;background:#f5e5e7;color:#855d67;font-size:11px;font-weight:800;">约会机会：${esc(archive.vote.winner)}</div>` : ""}
-          </section>` : ""}
-
-        <div class="xd-section-head">
-
-          <div class="xd-section-title">
-            观众席
-          </div>
-
-          <div class="xd-section-note">
-            LIVE DANMU
-          </div>
-
-        </div>
-
-        ${archive.danmuEnabled !== false ? `
-          <div class="xd-danmu-stage">
-            ${(archive.danmu && archive.danmu.length ? archive.danmu : ["这气氛突然不对劲了","救命谁先移开视线","我已经开始期待了","这个角色好会","弹幕已经开始押CP了"]).slice(0,12).map((d,i) => `<span class="xd-danmu-float" style="top:${8 + (i % 6) * 18}%;animation-delay:-${i * 1.2}s;">${esc(d)}</span>`).join("")}
-          </div>` : `<div class="xd-empty" style="padding:20px;"><div class="xd-empty-title">弹幕已关闭</div><div class="xd-empty-text">重新打开上方的胶囊开关即可恢复直播弹幕。</div></div>`}
-
-      </div>
-    `;
+      </div>`;
   }
 
   /* =========================================================
@@ -3861,20 +4014,27 @@
   function renderWeibo() {
     const items = state.currentArchive?.phone?.weibo || [];
     const chars = state.characters || [];
-    const categories = ["全部","节目报道","网友讨论","吃瓜","同人"];
-    const activeCategory = state.weiboCategory || "全部";
-    const visibleItems = activeCategory === "全部" ? items : items.filter(item => (item.category || "网友讨论") === activeCategory);
+    const categories = ["节目报道","网友讨论","吃瓜","同人"];
+    const activeCategory = state.weiboCategory || "节目报道";
+    const visibleItems = items.filter(item => (item.category || "网友讨论") === activeCategory);
+    const cards = state.currentArchive?.ai?.fanficCards || [];
     return renderPhoneSub("微博", "PUBLIC FEED", `
-      <div class="xd-section-head"><div class="xd-section-title">关于《${esc(state.currentArchive?.title || "心动现场")}》</div><div class="xd-section-note">吃瓜 / 报道 / 同人</div></div>
-      <div class="xd-phone-filter">${categories.map(c => `<button class="${activeCategory === c ? "active" : ""}" data-weibo-category="${esc(c)}">${esc(c)}</button>`).join("")}</div>
-      <div class="xd-phone-list" style="margin-top:10px;">
-        ${visibleItems.map((item, i) => `<article class="xd-phone-widget"><div class="xd-feed-head"><div class="xd-feed-avatar">${i === 0 ? "官" : "瓜"}</div><div><div class="xd-feed-name">${esc(item.author)}</div><div class="xd-feed-time">${esc(item.time)}</div></div></div><div class="xd-feed-text">${esc(item.text)}</div><div class="xd-feed-meta">${esc(item.meta || "热议中")}</div></article>`).join("")}
-        <article class="xd-phone-widget"><div class="xd-kicker">HOT SEARCH</div><div style="margin-top:8px;font-size:12px;font-weight:800;">#${esc(chars[0]?.name || "本季嘉宾")} 在节目里到底什么关系？</div><div style="margin-top:6px;font-size:10px;color:#8e8183;line-height:1.6;">网友正在根据节目片段、弹幕与匿名投稿进行各种猜测。</div></article>
-        <section class="xd-phone-widget" style="margin-top:10px;">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;"><div><div class="xd-kicker">AI FANFIC</div><div style="margin-top:5px;font-size:12px;font-weight:800;">把节目变成另一种故事</div></div><button class="xd-small-btn" data-generate-fanfic>生成4-5个选题</button></div>
-          <div id="xd-fanfic-list" style="margin-top:10px;">${(state.currentArchive?.ai?.fanficCards || []).map((c,i)=>`<button class="xd-phone-list-card" data-fanfic-index="${i}" style="width:100%;text-align:left;cursor:pointer;"><div class="xd-phone-list-title">${esc(c.title)}</div><div style="margin-top:5px;font-size:9px;color:#a97983;">${esc(c.tags)}</div><div class="xd-phone-list-desc">${esc(c.intro)}</div></button>`).join("")}</div>
+      <div class="xd-weibo-tabs">${categories.map(c => `<button class="${activeCategory === c ? "active" : ""}" data-weibo-category="${esc(c)}">${esc(c)}</button>`).join("")}</div>
+      <div class="xd-weibo-category-title">${esc(activeCategory)}</div>
+      ${activeCategory !== "同人" ? `
+        <div class="xd-phone-list">
+          ${visibleItems.length ? visibleItems.map((item, i) => `<article class="xd-phone-widget"><div class="xd-feed-head"><div class="xd-feed-avatar">${activeCategory === "节目报道" ? "官" : activeCategory === "网友讨论" ? "网" : "瓜"}</div><div><div class="xd-feed-name">${esc(item.author)}</div><div class="xd-feed-time">${esc(item.time)}</div></div></div><div class="xd-feed-text">${esc(item.text)}</div><div class="xd-feed-meta">${esc(item.meta || "热议中")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">暂时没有内容</div><div class="xd-empty-text">随着节目进展，这个分类会自动更新。</div></div>`}
+          ${activeCategory === "网友讨论" || activeCategory === "吃瓜" ? `<article class="xd-phone-widget"><div class="xd-kicker">HOT SEARCH</div><div style="margin-top:8px;font-size:12px;font-weight:800;">#${esc(chars[0]?.name || "本季嘉宾")} 在节目里到底什么关系？</div><div style="margin-top:6px;font-size:10px;color:#8e8183;line-height:1.6;">网友正在根据节目片段、弹幕与匿名投稿进行猜测。</div></article>` : ""}
+        </div>` : `
+        <section class="xd-phone-widget">
+          <div class="xd-kicker">AI FANFIC LAB</div>
+          <div style="margin-top:5px;font-size:12px;font-weight:800;">先选你想看的世界，再生成 4–5 个故事选题。</div>
+          <button class="xd-primary" data-generate-fanfic>选择设定并生成选题</button>
         </section>
-      </div>`);
+        <div class="xd-phone-list" style="margin-top:10px;">
+          ${cards.length ? cards.map((c,i)=>`<button class="xd-phone-list-card" data-fanfic-index="${i}" style="width:100%;text-align:left;cursor:pointer;"><div class="xd-phone-list-title">${esc(c.title)}</div><div style="margin-top:5px;font-size:9px;color:#a97983;">${esc(c.tags)}</div><div class="xd-phone-list-desc">${esc(c.intro)}</div></button>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有同人选题</div><div class="xd-empty-text">点击上方按钮，选择世界设定与参与角色。</div></div>`}
+        </div>`}
+    `);
   }
 
   function renderPhoneSMS() {
@@ -3885,7 +4045,7 @@
       <div class="xd-phone-list" style="margin-top:14px;">
         ${chars.map(char => {
           const last = items.slice().reverse().find(x => String(x.from) === String(char.name));
-          return `<article class="xd-phone-list-card"><div style="display:flex;align-items:center;gap:10px;">${avatarHTML(char, "xd-avatar")}</div><div style="margin-top:8px;display:flex;justify-content:space-between;gap:10px;"><div class="xd-phone-list-title">${esc(char.name)}</div><div style="font-size:8px;color:#a09597;">${esc(last?.time || "节目开始后")}</div></div><div class="xd-phone-list-desc">${esc(last?.text || "暂无消息。随着节目推进，这里会收到来自这位嘉宾的短信。")}</div></article>`;
+          return `<button class="xd-phone-list-card xd-contact-card" data-sms-char="${esc(char.characterId || char.id)}" style="width:100%;text-align:left;cursor:pointer;"><div style="display:flex;align-items:center;gap:10px;">${avatarHTML(char, "xd-avatar")}<div><div class="xd-phone-list-title">${esc(char.name)}</div><div style="font-size:8px;color:#a09597;">${esc(last?.time || "节目开始后")}</div></div></div><div class="xd-phone-list-desc">${esc(last?.text || "暂无消息。随着节目推进，这里会收到来自这位嘉宾的短信。")}</div></button>`;
         }).join("")}
         <article class="xd-phone-list-card"><div class="xd-phone-list-title">匿名短信</div><div class="xd-phone-list-desc">匿名短信会单独显示在这里，不会代替嘉宾短信列表。</div></article>
       </div>
@@ -3929,7 +4089,9 @@
 
   function renderWorldbooks() {
     const selectedIds = new Set((state.currentArchive?.worldbooks || []).map(w => String(w.id)));
-    const all = [...state.rocheWorldbooks, ...state.customWorldbooks].filter(wb => !state.currentArchive || selectedIds.has(String(wb.id)));
+    const all = state.currentArchive
+      ? [...state.rocheWorldbooks, ...state.customWorldbooks].filter(wb => selectedIds.has(String(wb.id)))
+      : [...state.rocheWorldbooks, ...state.customWorldbooks];
     return `
       <div class="xd-page">
         ${pageHead("WORLDBOOK LIBRARY","世界书库","先准备世界，再开始恋综")}
@@ -4365,26 +4527,17 @@
 
     if (!shell) return;
 
-    shell
-      .querySelectorAll("[data-tab]")
-      .forEach(button => {
-
-        listen(
-          button,
-          "click",
-          () => {
-
-            state.activeTab =
-              button.dataset.tab;
-
-            state.page = "tab";
-
-            renderPage();
-
-          }
-        );
-
-      });
+    listen(shell, "click", (event) => {
+      const button = event.target.closest?.("[data-tab]");
+      if (!button || !shell.contains(button)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const tab = button.dataset.tab;
+      if (!tab) return;
+      state.activeTab = tab;
+      state.page = "tab";
+      renderPage();
+    });
 
     listen(
       shell.querySelector("[data-action='back']"),
@@ -4692,80 +4845,143 @@
       renderPage();
     });
 
-    /* V2：开始第一天节目 / 继续今日玩法 */
+    /* V2.0.1：节目流程 / 防重复生成 */
     listen(root.querySelector("[data-start-show]"), "click", async () => {
-      if (!state.currentArchive) return;
+      if (!state.currentArchive || state.generating) return;
       const archive = state.currentArchive;
+      state.generating = true;
       try {
-        toast("AI 正在准备今天的节目……");
         if (archive.stage === "intro") {
-          archive.ai = archive.ai || {};
-          archive.ai.opening = await generateAIOpening(archive);
-          archive.lastNarrative = archive.ai.opening;
-          archive.lastQuote = "“第一天，大家还不知道谁会先动心。”";
-          archive.currentSceneLabel = "节目现场 · 嘉宾初次入场";
-          archive.stage = "task";
-          archive.events = archive.events || [];
-          archive.events.push({ type:"opening", day:1, createdAt:Date.now(), ai:true });
-          (archive.characters || []).forEach(char => {
-            const phone = archive.characterPhones[char.characterId] || (archive.characterPhones[char.characterId] = { sms:[], privateMessages:[], dynamics:[], diary:[], achievements:[], notes:[], weibo:[] });
-            phone.dynamics.push({ author:char.name, text:"第一天入住。很多事情还没发生，但我已经开始观察周围的人。", time:"今天" });
-            phone.diary.push({ title:"入住第一天", text:"新的节目开始了。我还不知道自己会对谁产生真正的在意。" });
-            phone.notes.push({ title:"节目第一天", text:"先观察，再决定下一步。" });
-            phone.status = "已入住 · 正在参与第一天节目";
-          });
-          archive.danmu = await generateAIDanmu(archive, "主持人欢迎、USER与嘉宾自我介绍");
-          await saveCurrentArchive();
-          toast("第一天节目已经开始");
-        } else {
-          const event = await generateAIEvent(archive, "第一天心动争夺战：每位嘉宾根据自己的人设选择一项特长挑战，争取获得与USER单独约会的机会");
+          if (!archive.ai?.introCards) {
+            showGenerating("正在开启 DAY 01……", "正在读取本季嘉宾、人设与角色记忆，准备主持人和逐位入场");
+            archive.ai = archive.ai || {};
+            archive.ai.introCards = await generateAIIntroCards(archive);
+            archive.ai.introIndex = 0;
+            archive.currentSceneLabel = "节目现场 · 主持人开场";
+            archive.events = archive.events || [];
+            archive.events.push({type:"opening", day:archive.currentDay || 1, createdAt:Date.now(), ai:true});
+            archive.danmu = await generateAIDanmu(archive, "主持人欢迎与嘉宾即将入场");
+          } else {
+            archive.ai.introIndex = (archive.ai.introIndex || 0) + 1;
+          }
+        } else if (archive.stage === "task") {
+          showGenerating("比赛正在进行……", "正在让每位嘉宾根据人设完成自己的挑战，并生成观众反应");
+          const event = await generateAIEvent(archive, "第一天心动争夺战：每位嘉宾独自完成一项最符合自己人设的特长挑战（如画画、厨艺、唱歌等），展示后由观众投票决定谁获得与USER单独约会的机会");
           archive.ai = archive.ai || {};
           archive.ai.lastEvent = event;
           archive.lastNarrative = event;
           archive.currentSceneLabel = "节目现场 · 心动争夺战";
           archive.events = archive.events || [];
-          archive.events.push({ type:"task", day:archive.currentDay || 1, title:"心动争夺战", text:event, createdAt:Date.now(), ai:true });
-          archive.danmu = await generateAIDanmu(archive, "心动争夺战：角色正在竞争与USER约会的机会");
-          if (!archive.vote) {
-            const chars = archive.characters || [];
-            const results = chars.map((c,i) => ({ name:c.name, score: Math.max(1, Math.round(100 / Math.max(chars.length,1) + (chars.length - i) * 4 + Math.random() * 12)) }));
-            const total = results.reduce((a,b)=>a+b.score,0) || 1;
-            results.forEach(r => r.score = Math.round(r.score / total * 100));
-            const winner = results.slice().sort((a,b)=>b.score-a.score)[0]?.name || chars[0]?.name || "嘉宾";
-            archive.vote = { title:"第一天心动争夺战", results, winner, createdAt:Date.now() };
-            archive.events.push({ type:"vote", day:1, winner, createdAt:Date.now() });
-          }
-          await saveCurrentArchive();
-          toast("今日任务已经推进");
+          archive.events.push({type:"task", day:archive.currentDay || 1, title:"心动争夺战", text:event, createdAt:Date.now(), ai:true});
+          archive.danmu = await generateAIDanmu(archive, "心动争夺战比赛现场");
+          const chars = archive.characters || [];
+          const results = chars.map((c,i) => ({name:c.name, score:Math.max(1, Math.round(55 + Math.random()*35 + (chars.length-i)*2))}));
+          const total = results.reduce((a,b)=>a+b.score,0) || 1;
+          results.forEach(r => r.score = Math.round(r.score / total * 100));
+          const winner = results.slice().sort((a,b)=>b.score-a.score)[0]?.name || chars[0]?.name || "嘉宾";
+          archive.vote = {title:"第一天心动争夺战", results, winner, createdAt:Date.now()};
+          archive.stage = "vote";
+          archive.events.push({type:"vote-ready", day:archive.currentDay || 1, winner, createdAt:Date.now()});
+        } else if (archive.stage === "vote") {
+          showGenerating("正在准备心动约会……", "根据获胜嘉宾的人设，为你们生成今晚最合适的约会方向");
+          const winnerChar = (archive.characters || []).find(c => c.name === archive.vote?.winner);
+          const prompt = `根据恋综《心动现场》中获胜嘉宾${winnerChar?.name || archive.vote?.winner}的人设，为他与USER设计3个不同气质的约会地点，只输出JSON数组，例如["一起做饭","海边散步","夜景出游"]。人设：${JSON.stringify(winnerChar || {})}`;
+          const raw = await aiText(prompt, {maxTokens:400, temperature:0.9});
+          const places = parseLooseJSON(raw, ["一起做晚餐","去海边散步","去城市里看夜景"]);
+          archive.ai = archive.ai || {};
+          archive.ai.datePlaces = Array.isArray(places) ? places.slice(0,3) : ["一起做晚餐","去海边散步","去城市里看夜景"];
+          archive.stage = "date";
+          archive.currentSceneLabel = "节目现场 · 心动约会";
+          archive.danmu = await generateAIDanmu(archive, "约会资格公布");
+        } else if (archive.stage === "date") {
+          showGenerating("正在生成约会……", "正在根据获胜嘉宾的人设与已经发生的事情安排今晚的相处");
+          const winner = archive.vote?.winner || "心动嘉宾";
+          const chosenPlace = archive.ai?.selectedDatePlace || archive.ai?.datePlaces?.[0] || "一起做晚餐";
+          const event = await generateAIEvent(archive, `USER与${winner}进行${chosenPlace}的单独约会`);
+          archive.ai.lastEvent = event;
+          archive.lastNarrative = event;
+          archive.currentSceneLabel = `约会现场 · ${chosenPlace}`;
+          archive.events = archive.events || [];
+          archive.events.push({type:"date", day:archive.currentDay || 1, winner, place:chosenPlace, text:event, createdAt:Date.now(), ai:true});
+          archive.danmu = await generateAIDanmu(archive, "心动约会");
+          archive.stage = "free";
+        } else if (archive.stage === "free") {
+          state.activeTab = "show";
+          state.page = "house";
+          archive.currentSceneLabel = "心动小屋 · 夜间自由活动";
+        } else if (archive.stage === "dayEnd") {
+          archive.currentDay = (archive.currentDay || 1) + 1;
+          archive.stage = "task";
+          archive.vote = null;
+          archive.ai = {...(archive.ai || {}), introCards:null, introIndex:0, lastEvent:""};
+          archive.currentSceneLabel = `节目现场 · DAY ${archive.currentDay} 新任务`;
+          archive.danmu = await generateAIDanmu(archive, `DAY ${archive.currentDay} 新节目开始`);
         }
+        await saveCurrentArchive();
+        state.generating = false;
+        hideGenerating();
+        renderPage();
       } catch (error) {
-        console.error("[心动现场] AI", error);
+        console.error("[心动现场] program flow", error);
+        state.generating = false;
+        hideGenerating();
         toast("AI 暂时没有回应，请稍后再试");
       }
-      renderPage();
     });
 
-    /* V2：AI 小屋事件 */
-    root.querySelectorAll("[data-ai-event]").forEach(button => {
+    root.querySelectorAll("[data-intro-next]").forEach(button => {
       listen(button, "click", async () => {
-        if (!state.currentArchive) return;
+        if (!state.currentArchive || state.generating) return;
+        const archive = state.currentArchive;
+        if (!archive.ai?.introCards) return;
+        state.generating = true;
         try {
-          toast("AI 正在生成事件……");
-          const text = await generateAIEvent(state.currentArchive, button.dataset.aiEvent || "夜间自由活动");
-          state.currentArchive.lastNarrative = text;
-          state.currentArchive.currentSceneLabel = "心动小屋 · 夜间自由活动";
-          state.currentArchive.events = state.currentArchive.events || [];
-          state.currentArchive.events.push({ type:"free", day:state.currentArchive.currentDay || 1, text, createdAt:Date.now(), ai:true });
-          state.currentArchive.danmu = await generateAIDanmu(state.currentArchive, "夜间自由活动");
+          archive.ai.introIndex = (archive.ai.introIndex || 0) + 1;
+          const total = (archive.ai.introCards.guests || []).length + 1;
+          if (archive.ai.introIndex >= total + 1) {
+            archive.stage = "task";
+            archive.currentSceneLabel = "节目现场 · 第一日任务";
+            archive.events = archive.events || [];
+            archive.events.push({type:"intro-complete", day:archive.currentDay || 1, createdAt:Date.now()});
+          } else {
+            archive.currentSceneLabel = archive.ai.introIndex === 1 ? "节目现场 · USER自我介绍" : `节目现场 · 嘉宾${archive.ai.introIndex - 1}入场`;
+          }
+          archive.danmu = await generateAIDanmu(archive, archive.currentSceneLabel);
           await saveCurrentArchive();
+          state.generating = false;
+          hideGenerating();
           renderPage();
         } catch (error) {
-          console.error("[心动现场] AI event", error);
+          state.generating = false;
+          hideGenerating();
           toast("AI 暂时没有回应，请稍后再试");
         }
       });
     });
 
+    root.querySelectorAll("[data-date-option]").forEach(button => {
+      listen(button, "click", async () => {
+        if (!state.currentArchive || state.generating) return;
+        const archive = state.currentArchive;
+        archive.ai = archive.ai || {};
+        archive.ai.selectedDatePlace = archive.ai.datePlaces?.[Number(button.dataset.dateOption)] || "一起做晚餐";
+        state.generating = true;
+        showGenerating("正在安排约会……", "正在把你的选择交给节目组");
+        try {
+          await saveCurrentArchive();
+          state.generating = false;
+          hideGenerating();
+          renderPage();
+        } catch {
+          state.generating = false;
+          hideGenerating();
+          toast("暂时无法保存约会选择");
+        }
+      });
+    });
+
+
+    /* V2.0.1：AI 随机事件只从心动小屋地点进入。 */
     /* 微博分类 */
     root
       .querySelectorAll("[data-weibo-category]")
@@ -4777,20 +4993,67 @@
       });
 
     root.querySelectorAll("[data-generate-fanfic]").forEach(button => {
-      listen(button, "click", async () => {
-        if (!state.currentArchive) return;
+      listen(button, "click", () => {
+        if (!state.currentArchive || state.generating) return;
+        openFanficSettings();
+      });
+    });
+
+    function openFanficSettings() {
+      const genres = ["青春校园","古代架空","ABO","娱乐圈","豪门","职场","赛博都市","奇幻魔法","民国","悬疑推理","无限流","末世校园","神话传说","末日求生","都市治愈","仙侠","轻喜剧","惊悚悬疑"];
+      const chars = state.characters || [];
+      const root = state.container.querySelector(".roche-plugin-xindong-xianchang");
+      const modal = document.createElement("div");
+      modal.className = "xd-modal-wrap";
+      modal.innerHTML = `
+        <section class="xd-modal xd-fanfic-settings">
+          <div class="xd-modal-handle"></div>
+          <div class="xd-kicker">AI FANFIC LAB</div>
+          <div class="xd-modal-title" style="margin-top:4px;">选择你的故事设定</div>
+          <div class="xd-setting-label">世界类型</div>
+          <div class="xd-chip-grid">${genres.map(g=>`<button class="xd-setting-chip ${state.fanficDraft.genres.includes(g) ? "active":""}" data-fanfic-genre="${esc(g)}">${esc(g)}</button>`).join("")}</div>
+          <div class="xd-setting-label">参与角色（可多选）</div>
+          <div class="xd-chip-grid">${chars.map(c=>`<button class="xd-setting-chip ${state.fanficDraft.characterIds.includes(c.characterId || c.id) ? "active":""}" data-fanfic-char="${esc(c.characterId || c.id)}">${esc(c.name)}</button>`).join("")}</div>
+          <div class="xd-setting-fixed">☑ 是否关联本季恋综经历：已关联</div>
+          <div class="xd-modal-actions"><button class="xd-small-btn" data-close-fanfic-settings>取消</button><button class="xd-primary" style="margin-top:0;" data-confirm-fanfic-settings>生成4-5个选题</button></div>
+        </section>`;
+      root.appendChild(modal);
+      modal.querySelectorAll("[data-fanfic-genre]").forEach(btn=>listen(btn,"click",()=>{
+        const g=btn.dataset.fanficGenre;
+        if (state.fanficDraft.genres.includes(g)) {
+          if (state.fanficDraft.genres.length > 1) state.fanficDraft.genres = state.fanficDraft.genres.filter(x=>x!==g);
+        } else state.fanficDraft.genres.push(g);
+        btn.classList.toggle("active", state.fanficDraft.genres.includes(g));
+      }));
+      modal.querySelectorAll("[data-fanfic-char]").forEach(btn=>listen(btn,"click",()=>{
+        const id=btn.dataset.fanficChar;
+        if (state.fanficDraft.characterIds.includes(id)) state.fanficDraft.characterIds=state.fanficDraft.characterIds.filter(x=>x!==id);
+        else state.fanficDraft.characterIds.push(id);
+        btn.classList.toggle("active", state.fanficDraft.characterIds.includes(id));
+      }));
+      listen(modal.querySelector("[data-close-fanfic-settings]"),"click",()=>modal.remove());
+      listen(modal.querySelector("[data-confirm-fanfic-settings]"),"click",async()=>{
+        if (!state.fanficDraft.characterIds.length) state.fanficDraft.characterIds = chars.map(c=>c.characterId || c.id);
+        modal.remove();
+        if (!state.currentArchive || state.generating) return;
+        state.generating = true;
+        showGenerating("正在生成同人选题……","正在按照你选择的世界设定、角色和本季经历生成4–5个故事");
         try {
-          toast("AI 正在生成同人选题……");
           state.currentArchive.ai = state.currentArchive.ai || {};
-          state.currentArchive.ai.fanficCards = await generateAIFanficTitles(state.currentArchive);
+          state.currentArchive.ai.fanficCards = await generateAIFanficTitles(state.currentArchive, state.fanficDraft);
           await saveCurrentArchive();
+          state.generating = false;
+          hideGenerating();
           renderPage();
-        } catch (error) {
+        } catch(error) {
+          state.generating = false;
+          hideGenerating();
           console.error("[心动现场] fanfic", error);
           toast("AI 暂时没有回应，请稍后再试");
         }
       });
-    });
+      listen(modal,"click",e=>{if(e.target===modal)modal.remove();});
+    }
 
     root.querySelectorAll("[data-fanfic-index]").forEach(button => {
       listen(button, "click", async () => {
@@ -4809,6 +5072,18 @@
           console.error("[心动现场] fanfic full", error);
           toast("AI 暂时没有回应，请稍后再试");
         }
+      });
+    });
+
+    /* User 手机短信联系人 */
+    root.querySelectorAll("[data-sms-char]").forEach(card => {
+      listen(card, "click", () => {
+        const id = card.dataset.smsChar;
+        const char = (state.characters || []).find(c => String(c.characterId || c.id) === String(id));
+        if (!char) return;
+        state.chatCharacter = char;
+        state.page = "chat";
+        renderPage();
       });
     });
 
@@ -5037,103 +5312,85 @@
      房间
      ========================================================= */
 
-  function openRoom(room) {
+  async function openRoom(room) {
+    if (!state.currentArchive || state.generating) return;
+    const names = { kitchen:"厨房", living:"客厅", bath:"卫生间", bedroom:"卧室", garden:"花园" };
+    const archive = state.currentArchive;
+    state.generating = true;
+    showGenerating(`正在观察${names[room] || "这个地点"}……`, "正在根据人设、关系、记忆和最近剧情生成随机事件");
+    try {
+      const event = await generateAIHouseEvent(archive, room);
+      state.generating = false;
+      hideGenerating();
+      const modal = document.createElement("div");
+      modal.className = "xd-modal-wrap";
+      modal.innerHTML = `
+        <section class="xd-modal xd-house-event-modal">
+          <div class="xd-modal-handle"></div>
+          <div class="xd-kicker">${esc(names[room] || "HOUSE EVENT")} · RANDOM EVENT</div>
+          <div class="xd-modal-title" style="margin-top:4px;">${esc(event.title || "小屋里的意外")}</div>
+          <div class="xd-house-event-scene">${esc(event.scene || "")}</div>
+          <div class="xd-house-event-options">
+            ${(event.options || []).slice(0,3).map((o,i)=>`<button class="xd-house-option" data-house-option="${i}"><span>${["A","B","C"][i]}</span><div><b>${esc(o.label || "做出选择")}</b><small>${esc(o.text || "")}</small></div></button>`).join("")}
+          </div>
+        </section>`;
+      state.container.querySelector(".roche-plugin-xindong-xianchang").appendChild(modal);
+      const options = (event.options || []).slice(0,3);
+      modal.querySelectorAll("[data-house-option]").forEach(button => {
+        listen(button, "click", async () => {
+          if (state.generating) return;
+          const option = options[Number(button.dataset.houseOption)];
+          if (!option) return;
+          state.generating = true;
+          showGenerating("正在生成选择结果……", "这个选择会影响今晚的关系与角色记忆");
+          try {
+            const result = await generateAIHouseOutcome(archive, event, option);
+            archive.lastNarrative = result;
+            archive.lastQuote = option.label || "";
+            archive.currentSceneLabel = `心动小屋 · ${names[room] || "地点"}`;
+            archive.events = archive.events || [];
+            archive.events.push({type:"house", day:archive.currentDay || 1, room, title:event.title, option:option.label, text:result, createdAt:Date.now(), ai:true});
+            archive.ai = archive.ai || {};
+            archive.ai.lastEvent = result;
+            archive.danmu = await generateAIDanmu(archive, `心动小屋 · ${names[room] || "地点"} · ${option.label}`);
+            await saveCurrentArchive();
+            modal.remove();
+            state.generating = false;
+            hideGenerating();
+            renderPage();
+          } catch (error) {
+            console.error("[心动现场] house outcome", error);
+            state.generating = false;
+            hideGenerating();
+            toast("AI 暂时没有回应，请稍后再试");
+          }
+        });
+      });
+      listen(modal, "click", e => { if (e.target === modal) modal.remove(); });
+    } catch (error) {
+      console.error("[心动现场] house event", error);
+      state.generating = false;
+      hideGenerating();
+      toast("AI 暂时没有回应，请稍后再试");
+    }
+  }
 
-    const names = {
-      kitchen:"厨房",
-      living:"客厅",
-      bath:"卫生间",
-      bedroom:"卧室",
-      garden:"花园"
-    };
+  function showGenerating(title, sub) {
+    const root = state.container?.querySelector(".roche-plugin-xindong-xianchang");
+    if (!root) return;
+    let overlay = root.querySelector("[data-generating-overlay]");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "xd-generating-overlay";
+      overlay.setAttribute("data-generating-overlay", "1");
+      root.appendChild(overlay);
+    }
+    overlay.innerHTML = `<div class="xd-generating-card"><div class="xd-generating-orbit"><i></i><i></i><i></i></div><div class="xd-generating-title">${esc(title || "正在生成")}</div><div class="xd-generating-sub">${esc(sub || "请稍候")}</div><div class="xd-generating-dots"><span></span><span></span><span></span></div></div>`;
+  }
 
-    const descriptions = {
-      kitchen:
-        "厨房是最容易自然发生互动的地方。做饭、帮忙、偷吃、抢食材，都可以成为剧情入口。",
-      living:
-        "客厅是所有人最容易碰面的公共空间。闲聊、游戏、偶遇都可能在这里发生。",
-      bath:
-        "卫生间暂时不会触发大型剧情，它更像一个短暂脱离镜头的私人角落。",
-      bedroom:
-        "卧室属于更私人的夜晚空间。随着节目规则推进，这里会出现更特殊的事件。",
-      garden:
-        "花园适合两个人短暂离开其他人的视线，进行更安静的交流。"
-    };
-
-    const modal =
-      document.createElement("div");
-
-    modal.className =
-      "xd-modal-wrap";
-
-    modal.innerHTML = `
-      <section class="xd-modal">
-
-        <div class="xd-modal-handle"></div>
-
-        <div class="xd-kicker">
-          LOCATION
-        </div>
-
-        <div
-          class="xd-modal-title"
-          style="margin-top:4px;"
-        >
-          ${esc(names[room] || "地点")}
-        </div>
-
-        <div
-          style="
-            margin-top:12px;
-            font-size:12px;
-            line-height:1.8;
-            color:#75696b;
-          "
-        >
-          ${esc(
-            descriptions[room] ||
-            "这里暂时还没有发生什么。"
-          )}
-        </div>
-
-        <button
-          class="xd-primary"
-          style="
-            width:100%;
-            margin-top:18px;
-          "
-          data-close-room
-        >
-          好，我去看看
-        </button>
-
-      </section>
-    `;
-
-    state.container
-      .querySelector(
-        ".roche-plugin-xindong-xianchang"
-      )
-      .appendChild(modal);
-
-    listen(
-      modal.querySelector(
-        "[data-close-room]"
-      ),
-      "click",
-      () => modal.remove()
-    );
-
-    listen(
-      modal,
-      "click",
-      e => {
-
-        if (e.target === modal)
-          modal.remove();
-
-      }
-    );
+  function hideGenerating() {
+    const overlay = state.container?.querySelector("[data-generating-overlay]");
+    if (overlay) overlay.remove();
   }
 
   /* =========================================================
