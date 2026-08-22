@@ -1,8 +1,18 @@
-/* 《心动现场》 V2.0.6 · 本次修复与优化
+/* 《心动现场》 V2.0.7 · 本次修复与优化
  * 作者：linyin8945
  *
  * 本次只处理：
- * - P0：恢复主界面“心动小屋”，并与“今日玩法”保持独立
+ * - 观察室/心动小屋说明分离、收藏剧情统一进入观察室
+ * - 心动小屋地图重新排版，修复地点拥挤与事件结果消失
+ * - 比拼互动固定“三选一 + 自定义”，并显示完整角色反应
+ * - 第二天约会流程修复，并保留角色已选地点/活动/主题
+ * - 第二天夜间玩法真正生成独立剧情，不再错误跳转心动小屋
+ * - 嘉宾手机人设移回嘉宾主页，手机页面只显示手机内容
+ * - 嘉宾聊天统一短信/私信记录，支持连续发送后再请求AI回复
+ * - 嘉宾手机动态/微博/日记/备忘录等增加AI生成入口
+ * - 我的手机与嘉宾手机聊天记录双向同步
+ * - 内置世界书正文快照增强，确保时代设定进入AI上下文
+ * - 第二天节目玩法扩充，并增加固定“双人约会”入口
  * - P0：修复底栏“嘉宾”入口点击失效；无论是否创建恋综都可进入
  * - P0：心动小屋无档案也可进入，节目进行中也始终可进入
  * - 恢复观察室入口
@@ -56,6 +66,7 @@
     detailCharacter: null,
     detailExpanded: false,
     chatCharacter: null,
+    chatPendingReply: false,
     generating: false,
     topbarHeight: 72,
     fanficDraft: {
@@ -299,7 +310,7 @@ USER：${JSON.stringify(ctx.user)}
 
   async function generateAIDatePlan(archive) {
     const ctx = buildAIContext(archive);
-    const winner = (archive.characters || []).find(c => String(c.name) === String(archive.vote?.winner)) || {};
+    const winner = (archive.characters || []).find(c => String(c.name) === String(archive.vote?.winner)) || (archive.characters || []).find(c => String(c.characterId || c.id) === String(archive.ai?.dateCharacterId)) || (archive.characters || [])[0] || {};
     const prompt = `你是《心动现场》的恋综导演。获胜嘉宾已经主动邀请USER约会，约会地点、活动和主题必须由角色根据自己的人设决定，不要让玩家选择地点。请严格只输出JSON，不要Markdown：{"place":"地点","activity":"活动","theme":"约会主题","opening":"约会开始时的场景"}。USER：${JSON.stringify(ctx.user)} 嘉宾：${JSON.stringify(winner)} 世界书：${ctx.worldbooks} 关系：${JSON.stringify(archive.relationships || {})}。内容必须符合世界书和角色人设。`;
     const text = await aiText(prompt, {maxTokens:900, temperature:0.9});
     return parseLooseJSON(text, {place:"由角色决定的约会地点", activity:"根据TA人设安排的活动", theme:"只属于你们的约会", opening:"他已经提前安排好了一切。"});
@@ -312,7 +323,7 @@ USER：${JSON.stringify(ctx.user)}
 角色已经提前决定地点、活动和主题，不要重新让玩家选择地点，也不要把约会拆成“选择地点→路上→地点”这种流程。
 这是一次3到4轮即可结束的短约会。当前第${phase}轮。
 第1轮负责进入约会与自然展开；第2轮加入更深入互动；第3轮出现一个有记忆点的心动瞬间；第4轮可以收尾。
-每一轮剧情要比普通一句话长，建议260-420字中文，包含现场细节、角色动作、符合人设的对话和情绪变化。
+每一轮剧情要比普通一句话长，建议420-650字中文，包含现场细节、角色动作、符合人设的对话和情绪变化。
 请输出JSON：
 {"scene":"260-420字约会现场剧情","options":[{"label":"选项1","text":"USER可以怎么回应"},{"label":"选项2","text":"USER可以怎么回应"},{"label":"选项3","text":"USER可以怎么回应"}],"danmuTopic":"弹幕主题","shouldEnd":false}
 如果当前第4轮，或剧情已经自然完成，可以返回3个选项但 shouldEnd=true；下一步会进入夜间，不再无限继续。
@@ -354,7 +365,7 @@ USER：${JSON.stringify(ctx.user)}
     const fallback = {
       title:`${competitionType}心动挑战`,
       intro:`所有嘉宾完成同一项${competitionType}挑战，镜头会记录他们准备、进行和完成作品的全过程。`,
-      contestants:(archive.characters||[]).map((c,i)=>({characterId:c.characterId||c.id,name:c.name,status:"正在准备",work:"比赛成果待揭晓",score:80-i*2,comment:"镜头捕捉到他很认真。",interactions:[{label:"鼓励他",result:"他明显放松了一点，动作也更稳了。"},{label:"逗他一下",result:"他被你逗得分心了一瞬间，又赶紧把注意力拉回来。"}]})),
+      contestants:(archive.characters||[]).map((c,i)=>({characterId:c.characterId||c.id,name:c.name,status:"正在准备",work:"比赛成果待揭晓",score:80-i*2,comment:"镜头捕捉到他很认真。",interactions:[{label:"鼓励他",result:"他明显放松了一点，动作也更稳了。"},{label:"逗他一下",result:"他被你逗得分心了一瞬间，又赶紧把注意力拉回来。"},{label:"故意捣蛋",result:"他先是愣了一下，随后看向你，明显被你的突然捣蛋打乱了节奏。"}]})),
       winner:(archive.characters||[])[0]?.characterId || (archive.characters||[])[0]?.id || "",
       danmu:["比赛开始了！","这次终于是统一项目了。","有人已经紧张到不行。"]
     };
@@ -3012,7 +3023,19 @@ USER：${JSON.stringify(ctx.user)}
           border-right:0;
         }
       }
+      /* V2.0.7 layout/chat overrides */
+      .xd-page,.xd-guest-card,.xd-phone-widget,.xd-phone-list-card,.xd-competition-card,.xd-cast-card,.xd-date-card,.xd-task-card,.xd-program-card{min-width:0;max-width:100%;overflow-wrap:anywhere;}
+      .xd-house-map{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:14px;border-radius:26px;background:rgba(255,255,255,.55);border:1px solid rgba(184,135,145,.13);box-shadow:var(--xd-shadow);}
+      .xd-house-map-center{grid-column:1/-1;min-height:86px;border-radius:22px;background:linear-gradient(135deg,rgba(255,255,255,.92),rgba(244,225,229,.85));display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;border:1px solid rgba(184,135,145,.12);}
+      .xd-house-map-center b{font-size:14px}.xd-house-map-center small{font-size:8px;color:#95878a;}
+      .xd-room-tile{min-width:0;border:1px solid rgba(184,135,145,.11);background:rgba(255,250,250,.88);border-radius:17px;padding:9px 6px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;text-align:center;box-shadow:0 5px 14px rgba(102,73,80,.04);}
+      .xd-room-tile:active{transform:scale(.97)}.xd-room-tile .xd-room-icon{font-size:21px;line-height:1}.xd-room-tile b{font-size:10px}.xd-room-tile small{font-size:7px;line-height:1.35;color:#95878a;white-space:normal;}
+      .xd-chat-compose{padding:9px 10px 12px;border-top:1px solid rgba(117,91,97,.08);background:rgba(255,255,255,.76);backdrop-filter:blur(18px);}.xd-chat-compose textarea{width:100%;resize:none;border:1px solid rgba(184,135,145,.14);border-radius:14px;background:#fffafa;padding:9px 10px;outline:none;}.xd-chat-compose-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:7px;}.xd-chat-message.me{justify-content:flex-end}.xd-chat-message:not(.me){justify-content:flex-start}.xd-chat-message.me .xd-chat-bubble{background:#ead7db;color:#574a4d;margin-left:auto;}.xd-chat-message:not(.me) .xd-chat-bubble{background:#fffafa;color:#514649;margin-right:auto;}.xd-chat-list{min-width:0;overflow-x:hidden}.xd-chat-bubble{max-width:82%;overflow-wrap:anywhere;white-space:pre-wrap;}
+      .xd-competition-main{min-width:0;overflow:hidden}.xd-contestant-status,.xd-competition-work{overflow-wrap:anywhere;white-space:normal}.xd-competition-card{min-width:0;overflow:hidden}
+      .xd-generating-overlay{z-index:1000!important;}
     `;
+
+
 
     document.head.appendChild(style);
   }
@@ -3274,7 +3297,7 @@ USER：${JSON.stringify(ctx.user)}
       mainContent=`<section class="xd-program-card"><div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · NEW DAY</div><div class="xd-program-title">新的一天开始了。</div><div class="xd-program-host">今天不必只有一条路线。你可以回到恋综节目流程，也可以先去心动小屋看看嘉宾正在做什么。</div><div style="display:grid;gap:9px;margin-top:16px;"><button class="xd-primary" data-day-choice="show" style="margin-top:0;">进入今天的恋综玩法</button><button class="xd-small-btn" data-day-choice="house" style="width:100%;">去心动小屋自由探索</button></div></section>`;
     } else if(stage==="task"){
       const types=["唱歌挑战","舞蹈挑战","厨艺挑战","创意挑战","趣味游戏"], selected=archive.ai?.competitionType||"";
-      mainContent=`<section class="xd-task-card"><div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · CHOOSE CHALLENGE</div><div class="xd-task-title">第一次心动争夺战</div><div class="xd-task-sub">这一次不是让嘉宾各自展示最擅长的东西。由你决定所有人统一参加什么项目。</div><div class="xd-chip-grid" style="margin-top:14px;">${types.map(t=>`<button class="xd-setting-chip ${selected===t?"active":""}" data-competition-type="${esc(t)}">${esc(t)}</button>`).join("")}</div><div style="margin-top:9px;"><button class="xd-setting-chip ${selected==="自定义挑战"?"active":""}" data-competition-type="自定义挑战">自定义挑战</button></div>${selected==="自定义挑战"?`<textarea class="xd-user-intro-input" data-competition-custom placeholder="例如：三分钟即兴表演、盲盒搭配、双人默契游戏……">${esc(archive.ai?.competitionCustom||"")}</textarea>`:""}<button class="xd-primary" data-start-show ${selected?"":"disabled"} style="margin-top:14px;">${selected?`开始${esc(selected)}`:"先选择比赛项目"}</button></section>`;
+      mainContent=`<section class="xd-task-card"><div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · CHOOSE CHALLENGE</div><div class="xd-task-title">第一次心动争夺战</div><div class="xd-task-sub">这一次不是让嘉宾各自展示最擅长的东西。由你决定所有人统一参加什么项目。</div><div class="xd-chip-grid" style="margin-top:14px;">${types.map(t=>`<button class="xd-setting-chip ${selected===t?"active":""}" data-competition-type="${esc(t)}">${esc(t)}</button>`).join("")}</div><div style="margin-top:9px;"><button class="xd-setting-chip ${selected==="自定义挑战"?"active":""}" data-competition-type="自定义挑战">自定义挑战</button></div>${selected==="自定义挑战"?`<textarea class="xd-user-intro-input" data-competition-custom placeholder="例如：三分钟即兴表演、盲盒搭配、双人默契游戏……">${esc(archive.ai?.competitionCustom||"")}</textarea>`:""}<button class="xd-primary" data-start-show ${selected?"":"disabled"} style="margin-top:14px;">${selected?`开始${esc(selected)}`:"先选择比赛项目"}</button><button class="xd-small-btn" data-fixed-date style="width:100%;margin-top:9px;">♡ 固定双人约会</button></section>`;
     } else if(stage==="competition"){
       const comp=archive.ai?.competition||{}, contestants=comp.contestants||[];
       mainContent=`<section class="xd-task-card"><div class="xd-stage-label">LIVE COMPETITION · ${esc(archive.ai?.competitionType||"统一挑战")}</div><div class="xd-task-title">${esc(comp.title||"比赛现场")}</div><div class="xd-task-sub">${esc(comp.intro||"镜头正在记录每位嘉宾的状态。点击嘉宾可以查看现场并进行互动。")}</div><div class="xd-competition-grid" style="margin-top:14px;">${contestants.map((c,i)=>`<button class="xd-competition-card" data-competition-char="${esc(c.characterId||c.id||i)}"><div class="xd-competition-avatar">${avatarHTML((archive.characters||[]).find(x=>String(x.characterId||x.id)===String(c.characterId))||c,"xd-mini-avatar xd-competition-avatar-small")}</div><div class="xd-competition-main"><div class="xd-contestant-name">${esc(c.name)}</div><div class="xd-contestant-status">${esc(c.status||"比赛进行中")}</div><div class="xd-competition-work">${esc(c.interactionResult || c.work || "正在进行……")}</div></div><span>›</span></button>`).join("")}</div><div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">弹幕实时刷新</div><div class="xd-scene-short">${esc((archive.danmu||[]).slice(0,3).join("  ·  "))}</div></div><button class="xd-primary" data-finish-competition style="margin-top:14px;">比赛结束，开始投票</button></section>`;
@@ -3288,7 +3311,7 @@ USER：${JSON.stringify(ctx.user)}
       mainContent=`<section class="xd-task-card"><div class="xd-stage-label">DANMU PICK · 第二个玩法</div><div class="xd-task-title">${esc(task.title||"弹幕心动任务")}</div><div class="xd-task-sub">这不是第一场比赛的重复。弹幕正在从不同组合和不同玩法里选出最想看的双人瞬间。</div><div class="xd-heart-vote-list" style="margin-top:14px;">${(task.options||[]).map(o=>`<button type="button" class="xd-heart-vote-card ${String(o.characterId)===String(chosenId)?"winner":""}" data-heart-choice="${esc(o.characterId||"")}"><div>${avatarHTML((archive.characters||[]).find(c=>String(c.characterId||c.id)===String(o.characterId))||o,"xd-mini-avatar xd-heart-avatar-small")}</div><div style="flex:1;text-align:left;"><div class="xd-contestant-name">${esc(o.name)}</div><div class="xd-heart-task"><b>${esc(o.taskTitle || "具体双人任务")}</b><br>${esc(o.task || "")}</div><div style="margin-top:5px;font-size:9px;color:#9b8b8f;">${esc(o.reason||"弹幕正在热议")}</div></div><strong>${Math.round(o.votes||0)}%</strong></button>`).join("")}</div>${chosen && !result ? `<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">已选定</div><div class="xd-scene-short">${esc(chosen.name)} · ${esc(chosen.task)}</div></div><button class="xd-primary" data-start-heart-task style="margin-top:12px;">开始这个双人任务</button>` : ""}${result ? `<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">LIVE · 双人任务</div><div class="xd-scene-short" style="white-space:pre-wrap;">${esc(result)}</div></div><button class="xd-primary" data-start-show style="margin-top:12px;">进入心动约会</button>` : ""}</section>`;
     } else if(stage==="date"){
       const winner=archive.vote?.winner||"心动嘉宾", plan=archive.ai?.datePlan||{}, scene=archive.ai?.dateScene;
-      mainContent=`<section class="xd-date-card"><div class="xd-stage-label">DATE · TONIGHT</div><div class="xd-date-title">${esc(winner)}已经为你安排好了今晚的约会。</div>${plan.place?`<div class="xd-phone-widget" style="margin-top:14px;"><div class="xd-kicker">TA CHOSE</div><div style="margin-top:6px;font-size:15px;font-weight:850;">${esc(plan.place)}</div><div style="margin-top:5px;font-size:10px;color:#8e8183;">${esc(plan.activity||"")}</div><div style="margin-top:8px;font-size:11px;line-height:1.7;">${esc(plan.theme||"")}</div></div>`:""}${scene?`<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">约会现场</div><div class="xd-scene-short">${esc(scene.scene||"")}</div></div>`:""}${scene&&(scene.options||[]).length?`<div class="xd-date-options">${scene.options.slice(0,3).map((o,i)=>`<button class="xd-date-option" data-date-action="${i}"><span>${["♡","✦","☾"][i]}</span><b>${esc(o.label)}</b><small>${esc(o.text||"")}</small></button>`).join("")}</div><button class="xd-small-btn" data-date-custom style="width:100%;margin-top:9px;">✎ 自定义我的回应</button>`:""}<button class="xd-primary" data-start-date-stage style="margin-top:14px;">${scene?.shouldEnd || (archive.ai?.datePhase||0)>=4 ? "结束约会，进入夜间" : scene&&(scene.options||[]).length?"继续约会":scene?"结束约会并返回小屋":"开始约会"}</button></section>`;
+      mainContent=`<section class="xd-date-card"><div class="xd-stage-label">DATE · TONIGHT</div><div class="xd-date-title">${esc(winner)}已经为你安排好了今晚的约会。</div>${plan.place?`<div class="xd-phone-widget" style="margin-top:14px;"><div class="xd-kicker">TA CHOSE</div><div style="margin-top:6px;font-size:15px;font-weight:850;">${esc(plan.place)}</div><div style="margin-top:5px;font-size:10px;color:#8e8183;">${esc(plan.activity||"")}</div><div style="margin-top:8px;font-size:11px;line-height:1.7;">${esc(plan.theme||"")}</div></div>`:""}${scene?`<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">约会现场</div><div class="xd-scene-short">${esc(scene.scene||"")}</div></div>`:""}${scene?`<button class="xd-small-btn" data-favorite-date style="width:100%;margin-top:9px;">♡ 收藏这次约会进观察室</button>`:""}${scene&&(scene.options||[]).length?`<div class="xd-date-options">${scene.options.slice(0,3).map((o,i)=>`<button class="xd-date-option" data-date-action="${i}"><span>${["♡","✦","☾"][i]}</span><b>${esc(o.label)}</b><small>${esc(o.text||"")}</small></button>`).join("")}</div><button class="xd-small-btn" data-date-custom style="width:100%;margin-top:9px;">✎ 自定义我的回应</button>`:""}<button class="xd-primary" data-start-date-stage style="margin-top:14px;">${scene?.shouldEnd || (archive.ai?.datePhase||0)>=4 ? "结束约会，进入夜间" : scene&&(scene.options||[]).length?"继续约会":scene?"结束约会并返回小屋":"开始约会"}</button></section>`;
     } else if(stage==="free"){
       if(day===1 && !archive.ai?.moveInNightDone){
         mainContent=`<section class="xd-free-card"><div class="xd-stage-label">NIGHT 01 · MOVE IN</div><div class="xd-task-title">第一晚：入住心动小屋</div><div class="xd-task-sub">第一晚固定发生入住选房。嘉宾会根据人设、关系和世界书选择房间，并留下第一晚的距离感。</div><button class="xd-primary" data-start-movein>开始入住夜</button><button class="xd-small-btn" data-open-house style="margin-top:10px;width:100%;">先去看看心动小屋</button></section>`;
@@ -3296,7 +3319,7 @@ USER：${JSON.stringify(ctx.user)}
         const move=archive.ai.moveInNight||{};
         mainContent=`<section class="xd-free-card"><div class="xd-stage-label">NIGHT 01 · RESULT</div><div class="xd-task-title">入住结果</div><div class="xd-task-sub" style="font-size:11px;line-height:1.9;white-space:pre-wrap;">${esc(move.summary||"大家已经选好了房间。")}</div><div class="xd-movein-list">${(move.rooms||[]).map(r=>`<div class="xd-movein-row"><b>${esc((archive.characters||[]).find(c=>String(c.characterId)===String(r.characterId))?.name||r.characterId||"嘉宾")}</b><span>${esc(r.room||"房间")}</span><small>${esc(r.reason||"")}</small><div style="margin-top:5px;font-size:9px;line-height:1.65;color:#8e8183;">${esc(r.action||"")}</div></div>`).join("")}</div>${(move.moments||[]).length?`<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">房间争夺现场</div>${move.moments.map(x=>`<div style="margin-top:7px;line-height:1.7;">${esc(x)}</div>`).join("")}</div>`:""}<div class="xd-program-result" style="margin-top:12px;"><div class="xd-stage-label">LIVE DANMU</div><div class="xd-scene-short">${esc((archive.danmu||[]).slice(0,3).join("  ·  "))}</div></div><button class="xd-primary" data-end-night style="margin-top:12px;">结束第一晚，进入第二天</button></section>`;
       } else {
-        mainContent=`<section class="xd-free-card"><div class="xd-stage-label">NIGHT · FREE TIME</div><div class="xd-task-title">晚上的时间，交给你。</div><div class="xd-task-sub">从第二天开始，夜间玩法池会根据世界书、恋综基调、嘉宾人设、关系和剧情进度动态生成。</div>${day>1&&archive.ai?.nightPlays?.length?`<div class="xd-phone-list" style="margin-top:14px;">${archive.ai.nightPlays.map((p,i)=>`<button class="xd-phone-list-card" data-night-play="${i}" style="width:100%;text-align:left;cursor:pointer;"><div class="xd-phone-list-title">${esc(p.title||"夜间玩法")}</div><div class="xd-phone-list-desc">${esc(p.desc||"")}</div></button>`).join("")}</div>`:""}${day>1?`<button class="xd-small-btn" data-generate-night style="width:100%;margin-top:10px;">✦ 生成今晚玩法</button>`:""}<button class="xd-primary" data-open-house>进入心动小屋</button><button class="xd-small-btn" data-end-night style="margin-top:10px;width:100%;">结束今晚 · 进入明天</button></section>`;
+        mainContent=`<section class="xd-free-card"><div class="xd-stage-label">NIGHT · FREE TIME</div><div class="xd-task-title">晚上的时间，交给你。</div><div class="xd-task-sub">从第二天开始，夜间玩法池会根据世界书、恋综基调、嘉宾人设、关系和剧情进度动态生成。</div>${archive.ai?.activeNightPlay?`<section class="xd-program-result" style="margin-top:14px;"><div class="xd-stage-label">TONIGHT · ${esc(archive.ai.activeNightPlay.title||"夜间玩法")}</div><div class="xd-scene-short" style="white-space:pre-wrap;line-height:1.9;">${esc(archive.ai.activeNightPlay.scene||archive.ai.activeNightPlay.result||"")}</div>${(archive.ai.activeNightPlay.options||[]).slice(0,3).map((o,i)=>`<button class="xd-date-option" data-night-action="${i}" style="width:100%;margin-top:8px;"><span>${["✦","♡","☾"][i]}</span><b>${esc(o.label||"行动")}</b><small>${esc(o.text||"")}</small></button>`).join("")}<button class="xd-small-btn" data-night-custom style="width:100%;margin-top:9px;">✎ 自定义行动</button></section>`:""}${day>1&&archive.ai?.nightPlays?.length&&!archive.ai?.activeNightPlay?`<div class="xd-phone-list" style="margin-top:14px;">${archive.ai.nightPlays.map((p,i)=>`<button class="xd-phone-list-card" data-night-play="${i}" style="width:100%;text-align:left;cursor:pointer;"><div class="xd-phone-list-title">${esc(p.title||"夜间玩法")}</div><div class="xd-phone-list-desc">${esc(p.desc||"")}</div></button>`).join("")}</div>`:""}${day>1?`<button class="xd-small-btn" data-generate-night style="width:100%;margin-top:10px;">✦ ${archive.ai?.activeNightPlay?"重新生成今晚玩法":"生成今晚玩法"}</button>`:""}<button class="xd-primary" data-open-house>进入心动小屋</button><button class="xd-small-btn" data-end-night style="margin-top:10px;width:100%;">结束今晚 · 进入明天</button></section>`;
       }
     } else mainContent=`<section class="xd-program-card"><div class="xd-stage-label">DAY ${String(day).padStart(2,"0")} · END</div><div class="xd-program-title">今天的录制结束了。</div><div class="xd-program-host">角色手机、动态、日记、成就与节目舆论已经更新。</div><button class="xd-primary" data-start-show>开始下一天</button></section>`;
     return `<div class="xd-page"><section class="xd-recording-hero"><div><div class="xd-kicker">TODAY'S RECORDING</div><div class="xd-recording-title">DAY ${String(day).padStart(2,"0")} · ${esc(stageNames[stage]||"LIVE")}</div><div class="xd-recording-sub">${esc(archive.title)} · ${stage==="free"?"夜间自由活动":"节目正在进行"}</div></div><div class="xd-recording-status"><span class="xd-live-dot"></span> LIVE</div></section><section class="xd-home-house-entry"><div class="xd-section-head" style="margin-top:18px;"><div class="xd-section-title">恋综生活</div><div class="xd-section-note">EXPLORE</div></div><button type="button" class="xd-home-house-card" data-open-house><div class="xd-home-house-icon">🏠</div><div class="xd-home-house-main"><div class="xd-kicker">HOUSE · LIVE</div><div class="xd-home-house-title">心动小屋</div><div class="xd-home-house-desc">独立于今日玩法的恋综生活空间。点击地点，触发随机事件、角色反应和关系变化。</div></div><div class="xd-home-house-arrow">›</div></button></section><section class="xd-home-house-entry"><button type="button" class="xd-home-house-card" data-open-observe><div class="xd-home-house-icon">📺</div><div class="xd-home-house-main"><div class="xd-kicker">OBSERVATION ROOM</div><div class="xd-home-house-title">观察室</div><div class="xd-home-house-desc">观看节目直播、弹幕与当前录制现场。</div></div><div class="xd-home-house-arrow">›</div></button></section><div class="xd-v2-toolbar"><span class="xd-ai-badge">✦ AI 剧情引擎</span><button class="xd-danmu-toggle ${archive.danmuEnabled!==false?"on":""}" data-danmu-toggle>💬 弹幕 <span class="xd-danmu-toggle-track"></span></button></div>${mainContent}<div class="xd-danmu-overlay ${archive.danmuEnabled!==false?"":"is-off"}">${(archive.danmu||[]).filter(Boolean).slice(0,3).map((d,i)=>`<span class="xd-danmu-tv-line line-${i}">${esc(d)}</span>`).join("")}</div></div>`;
@@ -3357,14 +3380,19 @@ USER：${JSON.stringify(ctx.user)}
      ========================================================= */
 
   function renderObserve() {
-    const archive = state.currentArchive;
-    const records = archive?.observationRecords || [];
-    const presence = archive?.housePresence !== false;
-    if (!archive) return `<div class="xd-page">${pageHead("OBSERVATION ROOM","节目观察室","世界尚未开机")}<div class="xd-empty"><div class="xd-empty-icon">👀</div><div class="xd-empty-title">观察室还没有节目</div><div class="xd-empty-text">创建恋综后，这里会记录你不在场时发生的小屋花絮。</div></div></div>`;
-    return `<div class="xd-page">${pageHead("OBSERVATION ROOM","节目观察室","节目之外的镜头")}
-      <section class="xd-phone-widget"><div class="xd-kicker">HOUSE EXPLORATION</div><div style="margin-top:6px;font-size:12px;font-weight:800;">小屋探索模式</div><div style="margin-top:5px;font-size:9px;line-height:1.6;color:#8e8183;">${presence?"你现在会参与地点事件，可以做出选择。":"你现在只观察，不参与；地点会生成嘉宾之间独立发生的花絮，并自动保存到观察室。"}</div><button class="xd-danmu-toggle ${presence?"on":""}" data-observe-presence style="margin-top:10px;pointer-events:auto;">${presence?"我在场":"不在场，仅观察"}<span class="xd-danmu-toggle-track"></span></button></section>
+    const archive=state.currentArchive;
+    if(!archive) return `<div class="xd-page">${pageHead("OBSERVATION ROOM","观察室","记录发生过的一切")}<section class="xd-phone-widget"><div class="xd-kicker">OBSERVATION ROOM</div><div style="margin-top:7px;font-size:12px;line-height:1.75;color:#75696b;">这里会保存已经发生过的节目剧情、随机事件、参加过的任务、约会与被收藏的高光。</div></section><div class="xd-empty"><div class="xd-empty-icon">👀</div><div class="xd-empty-title">观察室还没有节目记录</div><div class="xd-empty-text">创建恋综后，重要事件会逐渐出现在这里。</div></div></div>`;
+    const records=archive.observationRecords||[];
+    const events=(archive.events||[]).filter(e=>["competition-start","heart-task","date-scene","date-choice","house","house-favorite","house-observation","night-play","night-custom","move-in"].includes(e.type));
+    const presence=archive.housePresence!==false;
+    return `<div class="xd-page">${pageHead("OBSERVATION ROOM","观察室","记录发生过的事情、任务、约会与花絮")}
+      <section class="xd-phone-widget"><div class="xd-kicker">ABOUT THE OBSERVATION ROOM</div><div style="margin-top:7px;font-size:12px;font-weight:850;">这里保存恋综真正发生过的记录。</div><div style="margin-top:5px;font-size:9px;line-height:1.75;color:#8e8183;">包括节目任务、比赛、双人任务、约会、特殊事件，以及你在心动小屋里收藏的花絮。</div></section>
+      <div class="xd-section-head"><div class="xd-section-title">心动小屋</div><div class="xd-section-note">探索说明</div></div>
+      <section class="xd-phone-widget"><div class="xd-kicker">HOUSE EXPLORATION</div><div style="margin-top:7px;font-size:12px;font-weight:850;">${presence?"我在场 · 可以参与事件":"不在场 · 只观察嘉宾"}</div><div style="margin-top:5px;font-size:9px;line-height:1.65;color:#8e8183;">${presence?"进入地点后会出现三个行动选项和一个自定义回应。":"进入地点后不会出现玩家选项，只会生成嘉宾之间的独立花絮，并可收藏。"}</div><button class="xd-danmu-toggle ${presence?"on":""}" data-observe-presence style="margin-top:10px;">${presence?"我在场":"不在场，仅观察"}<span class="xd-danmu-toggle-track"></span></button></section>
       <div class="xd-section-head"><div class="xd-section-title">小屋观察记录</div><div class="xd-section-note">${records.length} 段</div></div>
-      <div class="xd-phone-list">${records.length ? records.slice().reverse().map((r,i)=>`<article class="xd-phone-widget"><div class="xd-kicker">${esc(r.roomName||"小屋花絮")}</div><div style="margin-top:6px;font-size:13px;font-weight:850;">${esc(r.title||"未命名花絮")}</div><div style="margin-top:7px;font-size:10px;line-height:1.8;color:#75696b;white-space:pre-wrap;">${esc(r.text||"")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-icon">📺</div><div class="xd-empty-title">还没有观察记录</div><div class="xd-empty-text">切换到“不在场”，再点击心动小屋的地点吧。</div></div>`}</div>
+      <div class="xd-phone-list">${records.length?records.slice().reverse().map(r=>`<article class="xd-phone-widget"><div class="xd-kicker">${esc(r.roomName||"小屋花絮")}</div><div style="margin-top:6px;font-size:13px;font-weight:850;">${esc(r.title||"未命名花絮")}</div><div style="margin-top:7px;font-size:10px;line-height:1.85;color:#75696b;white-space:pre-wrap;">${esc(r.text||"")}</div></article>`).join(""):`<div class="xd-empty"><div class="xd-empty-icon">📺</div><div class="xd-empty-title">还没有收藏的小屋记录</div><div class="xd-empty-text">在小屋事件中点击“收藏”即可保存。</div></div>`}</div>
+      <div class="xd-section-head"><div class="xd-section-title">节目记录</div><div class="xd-section-note">${events.length} 段</div></div>
+      <div class="xd-phone-list">${events.length?events.slice().reverse().map((e,i)=>`<article class="xd-phone-widget"><div class="xd-kicker">DAY ${esc(e.day||archive.currentDay||1)} · ${esc(e.type||"节目事件")}</div><div style="margin-top:6px;font-size:13px;font-weight:850;">${esc(e.title||e.currentSceneLabel||"节目记录")}</div><div style="margin-top:7px;font-size:10px;line-height:1.8;color:#75696b;white-space:pre-wrap;">${esc(e.text||e.scene||e.option||"")}</div><button class="xd-small-btn" data-observe-save-event="${i}" style="width:100%;margin-top:9px;">♡ 收藏进观察室</button></article>`).join(""):`<div class="xd-empty"><div class="xd-empty-title">还没有节目记录</div></div>`}</div>
     </div>`;
   }
 
@@ -3540,171 +3568,57 @@ USER：${JSON.stringify(ctx.user)}
      ========================================================= */
 
   function renderCharacterPhone(char) {
-    const archive = state.currentArchive || {};
-    const data = archive.characterPhones?.[char.characterId] || {};
-    const apps = [
-      ["sms","✉","短信"],["private","♡","私信"],["dynamics","◉","动态"],
-      ["diary","▤","日记"],["achievements","◇","成就"],["notes","✦","备忘录"],["weibo","◎","微博"]
-    ];
-    return `<div class="xd-page">
-      ${pageHead("CHAR PHONE", nameOf(char), "他的手机，只属于这一季恋综")}
-      <section class="xd-profile">${avatarHTML(char)}<div><div class="xd-profile-name">${esc(nameOf(char))}</div><div class="xd-profile-handle">${esc(handleOf(char) || "CHAR")}</div><div class="xd-profile-bio">${esc(char.bio || char.persona || "")}</div></div></section>
-      <div class="xd-phone-widget" style="margin-top:12px;"><div class="xd-kicker">PRIVATE DEVICE</div><div style="margin-top:6px;font-size:12px;line-height:1.7;color:#75696b;">这里记录这个角色在节目中的手机生活。内容会根据人设、关系、当天事件和已经发生的故事逐步更新。</div></div>
-      <div class="xd-char-phone-apps" style="margin-top:12px;">${apps.map(a => `<button class="xd-char-phone-app" data-char-phone-app="${a[0]}"><div class="xd-char-phone-icon">${a[1]}</div><div class="xd-char-phone-label">${a[2]}</div></button>`).join("")}</div>
-      <div class="xd-phone-widget" style="margin-top:12px;"><div class="xd-kicker">AI STATUS</div><div style="margin-top:6px;font-size:11px;color:#75696b;line-height:1.7;">${esc(data.status || "角色手机会随着节目进展自动变化。")}</div></div>
+    const archive=state.currentArchive||{};
+    const data=archive.characterPhones?.[char.characterId]||{};
+    const apps=[["sms","✉","聊天"],["dynamics","◉","动态"],["diary","▤","日记"],["achievements","◇","成就"],["notes","✦","备忘录"],["weibo","◎","微博"]];
+    return `<div class="xd-page">${pageHead("CHAR PHONE",nameOf(char),"TA自己的手机")}
+      <section class="xd-profile">${avatarHTML(char)}<div><div class="xd-profile-name">${esc(nameOf(char))}</div><div class="xd-profile-handle">${esc(handleOf(char)||"CHAR")}</div></div></section>
+      <div class="xd-char-phone-apps" style="margin-top:14px;">${apps.map(a=>`<button class="xd-char-phone-app" data-char-phone-app="${a[0]}"><div class="xd-char-phone-icon">${a[1]}</div><div class="xd-char-phone-label">${a[2]}</div></button>`).join("")}</div>
+      <section class="xd-phone-widget" style="margin-top:12px;"><div class="xd-kicker">PHONE STATUS</div><div style="margin-top:6px;font-size:10px;line-height:1.7;color:#75696b;">${esc(data.status||"手机内容会随着当天发生的节目事件、关系变化和角色人设逐渐更新。")}</div></section>
     </div>`;
   }
 
-  function renderCharacterPhoneSub(title, kicker, body) {
-    return `<div class="xd-page"><div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;"><button class="xd-small-btn" data-back-char-phone style="flex:0 0 auto;width:72px;">‹ 返回</button><div style="font-size:19px;font-weight:820;">${esc(title)}</div></div><div class="xd-kicker">${esc(kicker)}</div>${body}</div>`;
+  function renderCharacterPhoneSub(title,kicker,body){return `<div class="xd-page"><div style="display:flex;align-items:center;gap:10px;margin-bottom:5px;"><button class="xd-small-btn" data-back-char-phone style="flex:0 0 auto;width:72px;">‹ 返回</button><div style="font-size:19px;font-weight:820;">${esc(title)}</div></div><div class="xd-kicker">${esc(kicker)}</div>${body}</div>`;}
+
+  function charPhoneThread(char){
+    const archive=state.currentArchive||{};
+    const pid=char?.characterId||char?.id;
+    const a=archive.privateMessages?.[pid]||[];
+    const b=archive.characterPhones?.[pid]?.sms||[];
+    const merged=[...a,...b].map(x=>({...x,from:x.from==="user"?"me":x.from}));
+    const seen=new Set();
+    return merged.filter(x=>{const k=`${x.createdAt||0}|${x.from}|${x.text}`;if(seen.has(k))return false;seen.add(k);return true;}).sort((x,y)=>(x.createdAt||0)-(y.createdAt||0));
   }
 
-  function renderCharacterSMS(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.sms || [];
-    const peers = (archive.characters || []).filter(c => c.characterId !== char?.characterId);
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.map(x => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(x.from || "未知")}</div><div class="xd-phone-list-desc">${esc(x.text || "")}</div></article>`).join("")}${peers.map(p => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(p.name)}</div><div class="xd-phone-list-desc">${esc((items.find(x => x.from === p.name)?.text) || "节目开始后，这里会出现来自其他嘉宾的短信。")}</div></article>`).join("")}</div>`;
+  function renderCharacterSMS(char){
+    const items=charPhoneThread(char);
+    return renderCharacterPhoneSub("聊天","MESSAGES · SYNCED",`<div class="xd-chat-list" style="margin-top:12px;max-height:none;overflow:visible;">${items.length?items.map(x=>`<div class="xd-chat-message ${x.from==="me"?"me":""}"><div class="xd-chat-bubble">${esc(x.text||"")}</div></div>`).join(""):`<div class="xd-empty"><div class="xd-empty-title">还没有消息</div><div class="xd-empty-text">和USER的聊天会与USER手机同步。</div></div>`}</div><button class="xd-primary" data-open-synced-chat style="width:100%;margin-top:12px;">进入聊天并回复</button>`);
   }
+  function renderCharacterPrivate(char){return renderCharacterSMS(char);}
+  function renderCharacterDynamics(char){const archive=state.currentArchive||{};const items=archive.characterPhones?.[char?.characterId]?.dynamics||[];return renderCharacterPhoneSub("动态","CHAR MOMENTS",`${items.length?items.map(x=>`<article class="xd-phone-widget" style="margin-top:10px;"><div class="xd-feed-head"><div class="xd-feed-avatar">${esc((char?.name||"♡").slice(0,1))}</div><div><div class="xd-feed-name">${esc(char?.name||"未署名")}</div><div class="xd-feed-time">${esc(x.time||"刚刚")}</div></div></div><div class="xd-feed-text">${esc(x.text||"")}</div></article>`).join(""):`<div class="xd-empty" style="margin-top:12px;"><div class="xd-empty-title">还没有动态</div><div class="xd-empty-text">可以点击下面按钮让AI根据当天剧情生成一条。</div></div>`}<button class="xd-primary" data-char-ai-generate="dynamics" style="width:100%;margin-top:10px;">✦ AI生成动态</button>`);}
+  function renderCharacterDiary(char){const items=state.currentArchive?.characterPhones?.[char?.characterId]?.diary||[];return renderCharacterPhoneSub("日记","PRIVATE DIARY",`${items.length?items.map(x=>`<article class="xd-phone-list-card" style="margin-top:10px;"><div class="xd-phone-list-title">${esc(x.title||"今天")}</div><div class="xd-phone-list-desc">${esc(x.text||"")}</div></article>`).join(""):`<div class="xd-empty" style="margin-top:12px;"><div class="xd-empty-title">还没有日记</div></div>`}<button class="xd-primary" data-char-ai-generate="diary" style="width:100%;margin-top:10px;">✦ AI生成日记</button>`);}
+  function renderCharacterAchievements(char){const items=state.currentArchive?.characterPhones?.[char?.characterId]?.achievements||[];return renderCharacterPhoneSub("成就","ACHIEVEMENTS",`${items.length?items.map(x=>`<article class="xd-phone-list-card" style="margin-top:10px;"><div class="xd-phone-list-title">◇ ${esc(x.title||"成就")}</div><div class="xd-phone-list-desc">${esc(x.text||"")}</div></article>`).join(""):`<div class="xd-empty" style="margin-top:12px;"><div class="xd-empty-title">尚未解锁成就</div></div>`}`);}
+  function renderCharacterNotes(char){const items=state.currentArchive?.characterPhones?.[char?.characterId]?.notes||[];return renderCharacterPhoneSub("备忘录","NOTES",`${items.length?items.map(x=>`<article class="xd-phone-list-card" style="margin-top:10px;"><div class="xd-phone-list-title">${esc(x.title||"备忘")}</div><div class="xd-phone-list-desc">${esc(x.text||"")}</div></article>`).join(""):`<div class="xd-empty" style="margin-top:12px;"><div class="xd-empty-title">备忘录是空的</div></div>`}<button class="xd-primary" data-char-ai-generate="notes" style="width:100%;margin-top:10px;">✦ AI生成备忘录</button>`);}
+  function renderCharacterWeibo(char){const items=state.currentArchive?.characterPhones?.[char?.characterId]?.weibo||[];return renderCharacterPhoneSub("微博","CHAR WEIBO",`${items.length?items.map(x=>`<article class="xd-phone-widget" style="margin-top:10px;"><div class="xd-feed-head"><div class="xd-feed-avatar">${esc((char?.name||"♡").slice(0,1))}</div><div><div class="xd-feed-name">${esc(char?.name||"未署名")}</div><div class="xd-feed-time">${esc(x.time||"刚刚")}</div></div></div><div class="xd-feed-text">${esc(x.text||"")}</div></article>`).join(""):`<div class="xd-empty" style="margin-top:12px;"><div class="xd-empty-title">还没有微博</div></div>`}<button class="xd-primary" data-char-ai-generate="weibo" style="width:100%;margin-top:10px;">✦ AI生成微博</button>`);}
 
-  function renderCharacterPrivate(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.privateMessages?.[char?.characterId] || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(x.from === "me" ? "User" : x.from || "未知")}</div><div class="xd-phone-list-desc">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有私信</div><div class="xd-empty-text">随着节目中的竞争、吃醋和主动靠近，这里会自然出现消息。</div></div>`}</div>`;
-  }
-
-  function renderCharacterDynamics(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.dynamics || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-widget"><div class="xd-feed-head"><div class="xd-feed-avatar">${esc((char?.name || "♡").slice(0,1))}</div><div><div class="xd-feed-name">${esc(char?.name || "未署名")}</div><div class="xd-feed-time">${esc(x.time || "刚刚")}</div></div></div><div class="xd-feed-text">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有动态</div><div class="xd-empty-text">角色会根据当天经历发布类似朋友圈的动态。</div></div>`}</div>`;
-  }
-
-  function renderCharacterDiary(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.diary || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(x.title || "今天")}</div><div class="xd-phone-list-desc">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有日记</div><div class="xd-empty-text">日记会记录角色不想直接说出口的想法。</div></div>`}</div>`;
-  }
-
-  function renderCharacterAchievements(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.achievements || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(x.title || "成就")}</div><div class="xd-phone-list-desc">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">尚未解锁成就</div><div class="xd-empty-text">约会、任务、特殊事件和关系变化都会产生新的成就。</div></div>`}</div>`;
-  }
-
-  function renderCharacterNotes(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.notes || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-list-card"><div class="xd-phone-list-title">${esc(x.title || "备忘")}</div><div class="xd-phone-list-desc">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">备忘录是空的</div><div class="xd-empty-text">角色可以把观察、计划、User的喜好和自己的小心思写在这里。</div></div>`}</div>`;
-  }
-
-  function renderCharacterWeibo(char) {
-    const archive = state.currentArchive || {};
-    const items = archive.characterPhones?.[char?.characterId]?.weibo || [];
-    return `<div class="xd-phone-list" style="margin-top:14px;">${items.length ? items.map(x => `<article class="xd-phone-widget"><div class="xd-feed-head"><div class="xd-feed-avatar">${esc((char?.name || "♡").slice(0,1))}</div><div><div class="xd-feed-name">${esc(char?.name || "未署名")}</div><div class="xd-feed-time">${esc(x.time || "刚刚")}</div></div></div><div class="xd-feed-text">${esc(x.text || "")}</div></article>`).join("") : `<div class="xd-empty"><div class="xd-empty-title">还没有微博</div><div class="xd-empty-text">这里只展示这个角色自己的公开内容。</div></div>`}</div>`;
-  }
-
-  function renderPrivateChat(char) {
-
-    const archive =
-      state.currentArchive;
-
-    const messages =
-      archive?.privateMessages?.[char.id] ||
-      [
-        {
-          from:"char",
-          text:
-            "今晚……好像有很多话想和你说。"
-        }
-      ];
-
-    return `
-      <div class="xd-chat">
-
-        <div class="xd-chat-list">
-
-          <div class="xd-chat-person">
-
-            ${avatarHTML(char)}
-
-            <div>
-
-              <div
-                style="
-                  font-size:15px;
-                  font-weight:800;
-                "
-              >
-                ${esc(nameOf(char))}
-              </div>
-
-              <div
-                style="
-                  margin-top:3px;
-                  font-size:9px;
-                  color:#a97983;
-                "
-              >
-                PRIVATE MESSAGE
-              </div>
-
-            </div>
-
-          </div>
-
-          ${
-            messages.map((msg) => `
-              <div
-                class="
-                  xd-chat-message
-                  ${msg.from === "me" ? "me" : ""}
-                "
-              >
-
-                <div class="xd-chat-bubble">
-                  ${esc(msg.text)}
-                </div>
-
-              </div>
-            `).join("")
-          }
-
-        </div>
-
-        <div class="xd-chat-input">
-
-          <input
-            data-private-input
-            placeholder="写点什么……"
-          >
-
-          <button
-            class="xd-chat-send"
-            data-private-send
-          >
-            ↑
-          </button>
-
-        </div>
-
-      </div>
-    `;
+  function renderPrivateChat(char){
+    const archive=state.currentArchive||{}; const messages=charPhoneThread(char); const canReply=messages.some(x=>x.from==="me");
+    return `<div class="xd-chat"><div class="xd-chat-list"><div class="xd-chat-person">${avatarHTML(char)}<div><div style="font-size:15px;font-weight:800;">${esc(nameOf(char))}</div><div style="margin-top:3px;font-size:9px;color:#a97983;">SYNCED CHAT</div></div></div>${messages.length?messages.map(msg=>`<div class="xd-chat-message ${msg.from==="me"?"me":""}"><div class="xd-chat-bubble">${esc(msg.text||"")}</div></div>`).join(""):`<div class="xd-empty"><div class="xd-empty-title">还没有聊天记录</div><div class="xd-empty-text">发送几条消息后，再让TA统一回复。</div></div>`}</div><div class="xd-chat-compose"><textarea data-private-input rows="2" placeholder="连续写几条消息……"></textarea><div data-chat-reply-status style="display:none;margin:6px 2px;font-size:9px;color:#a97983;">正在回复中……</div><div class="xd-chat-compose-actions"><button class="xd-small-btn" data-private-send>发送消息</button><button class="xd-primary" data-private-reply ${canReply?"":"disabled"}>让TA回复</button></div></div></div>`;
   }
 
   /* =========================================================
      心动小屋
      ========================================================= */
 
-  function renderHouse() {
-    const archive=state.currentArchive; const presence=archive?.housePresence !== false;
-    const rooms=[
-      ["kitchen","🍳","厨房","香味已经飘出来了"],["living","🛋️","客厅","最容易发生偶遇"],["bath","🫧","卫生间","暂时安静的角落"],["bedroom","🛏️","卧室","夜晚之后的私人空间"],["garden","🌿","花园","最适合偷偷聊一会儿"],["study","📚","书房","安静得能听见翻页声"],["game","🎮","游戏室","最适合起哄和捣蛋"],["gym","🏋️","健身房","有人在这里偷偷较劲"],["rooftop","🌙","天台","夜风会把话题吹远"],["pool","🏊","泳池","白天和夜晚都可能有故事"],["terrace","🌤️","露台","适合吹风和偷听"],["media","📺","影音室","节目之外的另一个世界"],["dining","🍽️","餐厅","饭点总会有人出现"],["laundry","🧺","洗衣房","最容易撞见生活细节"],["studio","🎧","工作室","节目组留下的秘密角落"],["sunroom","☀️","阳光房","下午光线最好的地方"],["greenhouse","🌱","温室","有人会来照料植物"],["art","🎨","画室","适合安静做点东西"],["music","🎹","音乐室","隔音门后藏着旋律"],["tea","🍵","茶室","适合慢慢聊一些真心话"],["lookout","🔭","观景台","可以看见整个小屋"],["camp","🏕️","露营区","偶尔会有临时夜间活动"]
-    ];
-    return `<div class="xd-page">${pageHead("THE HOUSE","心动小屋","选择你想去的地方")}<section class="xd-phone-widget" style="margin-bottom:10px;"><div class="xd-kicker">EXPLORATION MODE</div><div style="margin-top:6px;font-size:12px;font-weight:850;">${presence?"我在场 · 可以参与事件":"不在场 · 只观察嘉宾"}</div><button class="xd-danmu-toggle ${presence?"on":""}" data-house-presence style="margin-top:9px;pointer-events:auto;">${presence?"我在场":"不在场，仅观察"}<span class="xd-danmu-toggle-track"></span></button></section><section class="xd-house xd-house-expanded"><div class="xd-house-roof"></div><div class="xd-house-floor"></div><div class="xd-house-status">LIVE HOUSE MAP</div><div class="xd-house-title"><div class="xd-house-name">心动小屋</div><div class="xd-house-sub">${archive?`DAY ${String(archive.currentDay||1).padStart(2,"0")} · ${esc(archive.currentTime||"20:36")}`:"未开机 · 可以先浏览"}</div></div>${rooms.map(([id,icon,name,desc])=>`<button class="xd-room xd-room-${id}" data-room="${id}"><div class="xd-room-icon">${icon}</div><div class="xd-room-name">${name}</div><div class="xd-room-desc">${desc}</div></button>`).join("")}</section><div class="xd-house-note"><div class="xd-kicker">HOW IT WORKS</div><div style="margin-top:6px;font-size:11px;font-weight:760;">${presence?"地点 → 随机事件 → 三选一 → 自定义回应 → 角色反应。":"地点 → 嘉宾花絮 → 自动保存观察室。"}</div></div></div>`;
+  function renderHouse(){
+    const archive=state.currentArchive; const presence=archive?.housePresence!==false;
+    const rooms=[["kitchen","🍳","厨房","香味与偶遇"],["living","🛋️","客厅","最容易碰见人"],["garden","🌿","花园","适合散步聊天"],["study","📚","书房","安静角落"],["game","🎮","游戏室","起哄与捣蛋"],["gym","🏋️","健身房","偷偷较劲"],["rooftop","🌙","天台","夜风与真心话"],["pool","🏊","泳池","白天和夜晚"],["terrace","🌤️","露台","吹风偷听"],["media","📺","影音室","一起看点什么"],["dining","🍽️","餐厅","饭点总有人"],["laundry","🧺","洗衣房","生活细节"],["studio","🎧","工作室","节目组角落"],["sunroom","☀️","阳光房","午后采光"],["greenhouse","🌱","温室","照料植物"],["art","🎨","画室","安静做东西"],["music","🎹","音乐室","隔音门后"],["tea","🍵","茶室","慢慢聊"],["lookout","🔭","观景台","俯瞰小屋"],["camp","🏕️","露营区","临时夜间活动"],["balcony","🌸","花架","适合独处"],["fireplace","🔥","壁炉厅","夜里最暖"],["library","📖","藏书室","翻旧书"],["veranda","🪴","回廊","偶遇概率很高"]];
+    return `<div class="xd-page">${pageHead("THE HOUSE","心动小屋","恋综生活空间 · 自由探索")}
+      <section class="xd-phone-widget"><div class="xd-kicker">HOUSE EXPLORATION</div><div style="margin-top:7px;font-size:12px;font-weight:850;">${presence?"我在场 · 可以参与事件":"不在场 · 只观察嘉宾"}</div><div style="margin-top:5px;font-size:9px;line-height:1.65;color:#8e8183;">${presence?"进入地点后：随机事件 → 三选一 → 自定义回应 → 角色反应。":"进入地点后只生成嘉宾之间的独立花絮，并可收藏到观察室。"}</div><button class="xd-danmu-toggle ${presence?"on":""}" data-house-presence style="margin-top:9px;">${presence?"我在场":"不在场，仅观察"}<span class="xd-danmu-toggle-track"></span></button></section>
+      <section class="xd-house-map"><div class="xd-house-map-center"><div style="font-size:30px;">🏠</div><b>心动小屋</b><small>${archive?`DAY ${String(archive.currentDay||1).padStart(2,"0")} · LIVE`:"未开机 · 可浏览"}</small></div>${rooms.map(([id,icon,name,desc])=>`<button class="xd-room-tile" data-room="${id}"><span class="xd-room-icon">${icon}</span><b>${name}</b><small>${desc}</small></button>`).join("")}</section>
+      <div class="xd-house-note"><div class="xd-kicker">HOW IT WORKS</div><div style="margin-top:6px;font-size:11px;font-weight:760;line-height:1.65;">${presence?"地点 → 随机事件 → 三个行动 → 自定义回应 → 角色反应 → 关系变化。":"地点 → 嘉宾花絮 → 自动保存 → 观察室回看。"}</div></div>
+    </div>`;
   }
-
-  /* =========================================================
-     我的手机
-     ========================================================= */
 
   function renderPhone() {
     const archive = state.currentArchive;
@@ -3814,19 +3728,9 @@ USER：${JSON.stringify(ctx.user)}
     `);
   }
 
-  function renderPhoneSMS() {
-    const archive = state.currentArchive;
-    const items = archive?.phone?.sms || [];
-    const chars = archive?.characters || [];
-    return renderPhoneSub("短信", "MESSAGES", `
-      <div class="xd-phone-list" style="margin-top:14px;">
-        ${chars.map(char => {
-          const last = items.slice().reverse().find(x => String(x.from) === String(char.name));
-          return `<button class="xd-phone-list-card xd-contact-card" data-sms-char="${esc(char.characterId || char.id)}" style="width:100%;text-align:left;cursor:pointer;"><div style="display:flex;align-items:center;gap:10px;">${avatarHTML(char, "xd-avatar")}<div><div class="xd-phone-list-title">${esc(char.name)}</div><div style="font-size:8px;color:#a09597;">${esc(last?.time || "节目开始后")}</div></div></div><div class="xd-phone-list-desc">${esc(last?.text || "暂无消息。随着节目推进，这里会收到来自这位嘉宾的短信。")}</div></button>`;
-        }).join("")}
-        <article class="xd-phone-list-card"><div class="xd-phone-list-title">匿名短信</div><div class="xd-phone-list-desc">匿名短信会单独显示在这里，不会代替嘉宾短信列表。</div></article>
-      </div>
-    `);
+  function renderPhoneSMS(){
+    const archive=state.currentArchive; const chars=archive?.characters||[];
+    return renderPhoneSub("短信","SYNCED CHAT",`<div class="xd-phone-list" style="margin-top:14px;">${chars.map(char=>{const msgs=charPhoneThread(char);const last=msgs.slice(-1)[0];return `<button class="xd-phone-list-card xd-contact-card" data-sms-char="${esc(char.characterId||char.id)}" style="width:100%;text-align:left;cursor:pointer;"><div style="display:flex;align-items:center;gap:10px;">${avatarHTML(char,"xd-avatar")}<div style="min-width:0;"><div class="xd-phone-list-title">${esc(char.name)}</div><div style="font-size:8px;color:#a09597;">${esc(last?.createdAt?"刚刚":"节目开始后")}</div></div></div><div class="xd-phone-list-desc">${esc(last?.text||"还没有消息")}</div></button>`;}).join("")||`<div class="xd-empty"><div class="xd-empty-title">还没有嘉宾聊天</div></div>`}</div>`);
   }
 
   function renderPhoneNotes() {
@@ -4456,6 +4360,23 @@ USER：${JSON.stringify(ctx.user)}
       renderPage();
     });
 
+    listen(root.querySelector("[data-open-synced-chat]"),"click",()=>{if(state.detailCharacter){state.chatCharacter=state.detailCharacter;state.page="chat";renderPage();}});
+    root.querySelectorAll("[data-char-ai-generate]").forEach(button=>listen(button,"click",async()=>{
+      const char=state.detailCharacter, archive=state.currentArchive, app=button.dataset.charAiGenerate;
+      if(!char||!archive||state.generating)return;
+      state.generating=true;showGenerating("正在生成TA的手机内容……","AI会根据角色人设、关系与当天剧情生成");
+      try{
+        const text=await generateAIPhoneAppContent(archive,char,app);
+        const id=char.characterId||char.id;
+        archive.characterPhones=archive.characterPhones||{};
+        archive.characterPhones[id]=archive.characterPhones[id]||{};
+        const key=app==="dynamics"?"dynamics":app==="diary"?"diary":app==="notes"?"notes":"weibo";
+        archive.characterPhones[id][key]=archive.characterPhones[id][key]||[];
+        archive.characterPhones[id][key].push(app==="diary"?{title:"今天",text,time:"刚刚"}:app==="notes"?{title:"刚刚记下",text,time:"刚刚"}:{text,time:"刚刚"});
+        await saveCurrentArchive();state.generating=false;hideGenerating();renderPage();
+      }catch{state.generating=false;hideGenerating();toast("AI 暂时没有回应");}
+    }));
+
     root.querySelectorAll("[data-char-phone-app]").forEach(button => {
       listen(button, "click", () => {
         state.page = `char-phone-${button.dataset.charPhoneApp}`;
@@ -4492,65 +4413,59 @@ USER：${JSON.stringify(ctx.user)}
       }
     );
 
-    /* 私信发送 */
+    /* 私信/短信统一聊天：发送与请求AI回复分开 */
+    listen(root.querySelector("[data-private-send]"),"click",async()=>{
+      const input=root.querySelector("[data-private-input]"), text=input?.value?.trim(), char=state.chatCharacter, archive=state.currentArchive;
+      if(!text||!char||!archive)return;
+      const id=char.characterId||char.id;
+      archive.privateMessages=archive.privateMessages||{};
+      archive.privateMessages[id]=archive.privateMessages[id]||[];
+      archive.privateMessages[id].push({from:"me",text,createdAt:Date.now()});
+      archive.characterPhones=archive.characterPhones||{};
+      archive.characterPhones[id]=archive.characterPhones[id]||{};
+      archive.characterPhones[id].sms=archive.characterPhones[id].sms||[];
+      archive.characterPhones[id].sms.push({from:"me",text,createdAt:Date.now()});
+      await saveCurrentArchive();
+      input.value="";
+      renderPage();
+    });
 
-    listen(
-      root.querySelector(
-        "[data-private-send]"
-      ),
-      "click",
-      async () => {
-
-        const input =
-          root.querySelector(
-            "[data-private-input]"
-          );
-
-        const text =
-          input?.value.trim();
-
-        if (!text) return;
-
-        const char =
-          state.chatCharacter;
-
-        if (!char) return;
-
-        if (!state.currentArchive)
-          return;
-
-        if (!state.currentArchive.privateMessages)
-          state.currentArchive.privateMessages = {};
-
-        if (!state.currentArchive.privateMessages[char.id])
-          state.currentArchive.privateMessages[char.id] = [];
-
-        state.currentArchive
-          .privateMessages[char.id]
-          .push({
-            from:"me",
-            text,
-            createdAt:Date.now()
-          });
-
-        state.generating = true;
-        showGenerating("正在等待TA回复……","AI正在根据人设、关系和刚刚的消息回应");
-        try {
-          const ctx=buildAIContext(state.currentArchive);
-          const reply=await aiText(`你是恋综嘉宾${char.name}，请根据你的人设、与USER当前关系、今天已经发生的剧情和USER刚发来的私信，直接写出自然的聊天回复。不要解释，不要说自己是AI。回复约60-140字。
+    listen(root.querySelector("[data-private-reply]"),"click",async()=>{
+      const char=state.chatCharacter, archive=state.currentArchive;
+      if(!char||!archive||state.generating)return;
+      const id=char.characterId||char.id;
+      const msgs=charPhoneThread(char);
+      const pending=msgs.filter(x=>x.from==="me").slice(-8);
+      if(!pending.length)return;
+      state.generating=true;
+      const rootShell=state.container.querySelector(".roche-plugin-xindong-xianchang");
+      const status=rootShell?.querySelector("[data-chat-reply-status]");
+      if(status) status.style.display="block";
+      try{
+        const ctx=buildAIContext(archive);
+        const reply=await aiText(`你是恋综嘉宾${char.name}。根据你的人设、与USER的当前关系、最近剧情和USER刚刚连续发送的消息，回复这一整段聊天。不要逐条机械回答，要像真实聊天一样自然承接。不要说自己是AI。约100-220字。
 USER：${JSON.stringify(ctx.user)}
 你的资料：${JSON.stringify(char)}
-关系：${JSON.stringify(state.currentArchive.relationships||{})}
-今日事件：${JSON.stringify((state.currentArchive.events||[]).slice(-10))}
-USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
-          state.currentArchive.privateMessages[char.id].push({from:"char",text:reply,createdAt:Date.now()});
-        } catch {}
+关系：${JSON.stringify(archive.relationships||{})}
+最近消息：${JSON.stringify(pending)}`,{maxTokens:700,temperature:.9});
+        archive.privateMessages=archive.privateMessages||{};
+        archive.privateMessages[id]=archive.privateMessages[id]||[];
+        archive.privateMessages[id].push({from:"char",text:reply,createdAt:Date.now()});
+        archive.characterPhones=archive.characterPhones||{};
+        archive.characterPhones[id]=archive.characterPhones[id]||{};
+        archive.characterPhones[id].sms=archive.characterPhones[id].sms||[];
+        archive.characterPhones[id].sms.push({from:"char",text:reply,createdAt:Date.now()});
+        archive.phone=archive.phone||{};
+        archive.phone.sms=archive.phone.sms||[];
+        archive.phone.sms.push({from:char.name,text:reply,time:"刚刚",createdAt:Date.now()});
         await saveCurrentArchive();
-        state.generating = false; hideGenerating();
+        state.generating=false;
         renderPage();
-
+      }catch{
+        state.generating=false;
+        toast("TA暂时没有回复，请稍后再试");
       }
-    );
+    });
 
     /* 观察室 */
 
@@ -4575,6 +4490,16 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
         );
 
       });
+
+    root.querySelectorAll("[data-observe-save-event]").forEach(btn=>listen(btn,"click",async()=>{
+      const archive=state.currentArchive;if(!archive)return;
+      const events=(archive.events||[]).filter(e=>["competition-start","heart-task","date-scene","date-choice","house","house-favorite","house-observation","night-play","night-custom","move-in"].includes(e.type));
+      const e=events.slice().reverse()[Number(btn.dataset.observeSaveEvent)];if(!e)return;
+      archive.observationRecords=archive.observationRecords||[];
+      const rec={id:uid(),type:e.type,title:e.title||e.currentSceneLabel||"节目记录",text:e.text||e.scene||e.option||"",day:e.day||archive.currentDay||1,createdAt:Date.now(),favorite:true};
+      if(!archive.observationRecords.some(x=>x.type===rec.type&&x.title===rec.title&&x.text===rec.text))archive.observationRecords.push(rec);
+      await saveCurrentArchive();btn.textContent="♥ 已收藏";
+    }));
 
     /* 房屋 */
 
@@ -4620,7 +4545,7 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
         archive.currentSceneLabel = `DAY ${archive.currentDay || 1} · 今日录制结束`;
         archive.events = archive.events || [];
         archive.events.push({type:"night-end", day:archive.currentDay || 1, createdAt:Date.now()});
-        archive.ai.nightPlays = null;
+        archive.ai.nightPlays = null; archive.ai.activeNightPlay = null;
         await saveCurrentArchive();
         state.generating=false; hideGenerating(); renderPage();
       } catch { state.generating=false; hideGenerating(); toast("暂时无法结束今晚"); }
@@ -4657,7 +4582,19 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
       try { state.currentArchive.ai=state.currentArchive.ai||{}; state.currentArchive.ai.nightPlays=await generateAINightPlayPool(state.currentArchive); await saveCurrentArchive(); state.generating=false; hideGenerating(); renderPage(); }
       catch { state.generating=false; hideGenerating(); toast("AI 暂时没有回应，请稍后再试"); }
     });
-    root.querySelectorAll("[data-night-play]").forEach(button=>listen(button,"click",async()=>{ const p=state.currentArchive?.ai?.nightPlays?.[Number(button.dataset.nightPlay)]; if(!p||state.generating)return; openPlay("custom-night"); }));
+    root.querySelectorAll("[data-night-play]").forEach(button=>listen(button,"click",async()=>{
+      const p=state.currentArchive?.ai?.nightPlays?.[Number(button.dataset.nightPlay)]; if(!p||state.generating)return;
+      const archive=state.currentArchive; state.generating=true; showGenerating("正在展开今晚玩法……",p.desc||"正在根据世界书和嘉宾人设生成现场");
+      try{const data=await generateAINightPlayContent(archive,p); archive.ai=archive.ai||{}; archive.ai.activeNightPlay={...data,source:p,startedAt:Date.now()}; archive.events=archive.events||[]; archive.events.push({type:"night-play",day:archive.currentDay||1,title:data.title,text:data.scene,createdAt:Date.now(),ai:true}); archive.lastNarrative=data.scene; await saveCurrentArchive(); state.generating=false;hideGenerating(); renderPage();}
+      catch(e){state.generating=false;hideGenerating();toast("今晚玩法暂时生成失败，请稍后再试");}
+    }));
+
+    root.querySelectorAll("[data-night-action]").forEach(btn=>listen(btn,"click",async()=>{
+      if(!state.currentArchive||state.generating)return; const archive=state.currentArchive; const active=archive.ai?.activeNightPlay; const option=active?.options?.[Number(btn.dataset.nightAction)]; if(!option)return;
+      state.generating=true; showGenerating("正在回应你的选择……","今晚玩法会继续推进");
+      try{const result=await aiText(`继续展开《心动现场》夜间玩法。玩法：${JSON.stringify(active)}。玩家选择：${JSON.stringify(option)}。请生成220-420字后续，体现具体角色反应、关系变化和现场细节。世界书：${buildAIContext(archive).worldbooks} 人设：${JSON.stringify(archive.characters)} 关系：${JSON.stringify(archive.relationships||{})}。不要让嘉宾之间发展恋爱CP。`,{maxTokens:1000,temperature:.95}); archive.lastNarrative=result; archive.events=archive.events||[]; archive.events.push({type:"night-play-choice",day:archive.currentDay||1,title:active.title,text:result,option:option.label,createdAt:Date.now(),ai:true}); archive.ai.activeNightPlay.result=result; await saveCurrentArchive(); state.generating=false;hideGenerating();renderPage();}catch{state.generating=false;hideGenerating();toast("今晚玩法暂时无法继续");}
+    }));
+    listen(root.querySelector("[data-night-custom]"),"click",async()=>{const text=window.prompt("你想怎么参与今晚的玩法？");if(!text?.trim()||!state.currentArchive||state.generating)return;const archive=state.currentArchive,active=archive.ai?.activeNightPlay;state.generating=true;showGenerating("正在回应你的自定义行动……","AI会继续当前夜间玩法");try{const result=await aiText(`继续当前恋综夜间玩法。玩法：${JSON.stringify(active)}。玩家自定义行动：${text.trim()}。生成220-420字自然后续，符合世界书、人设和关系。恋爱线只围绕USER，不生成嘉宾CP。`,{maxTokens:1000,temperature:.95});archive.lastNarrative=result;archive.events=archive.events||[];archive.events.push({type:"night-custom",day:archive.currentDay||1,title:active?.title||"夜间玩法",text:result,option:text.trim(),createdAt:Date.now(),ai:true});archive.ai.activeNightPlay.result=result;await saveCurrentArchive();state.generating=false;hideGenerating();renderPage();}catch{state.generating=false;hideGenerating();toast("自定义行动暂时无法继续");}});
 
     /* 房间 */
 
@@ -4815,6 +4752,17 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
       });
     });
 
+    listen(root.querySelector("[data-fixed-date]"),"click",async()=>{
+      if(!state.currentArchive||state.generating)return;
+      const archive=state.currentArchive;const chars=archive.characters||[];
+      const target=chars.find(c=>String(c.characterId||c.id)===String(archive.vote?.winnerCharacterId))||chars[0];
+      if(!target){toast("还没有可约会的嘉宾");return;}
+      state.generating=true;showGenerating("正在安排双人约会……","让角色根据自己的人设决定地点、活动与主题");
+      try{
+        archive.ai=archive.ai||{};archive.ai.dateCharacterId=target.characterId||target.id;archive.ai.datePlan=await generateAIDatePlan(archive);archive.ai.dateScene=null;archive.ai.datePhase=0;archive.ai.dateReadyToEnd=false;archive.stage="date";archive.currentSceneLabel="节目现场 · 双人约会";archive.events=archive.events||[];archive.events.push({type:"date-start",day:archive.currentDay||1,winner:target.name,place:archive.ai.datePlan.place,activity:archive.ai.datePlan.activity,createdAt:Date.now(),ai:true});await saveCurrentArchive();state.generating=false;hideGenerating();renderPage();
+      }catch{state.generating=false;hideGenerating();toast("约会暂时无法开始");}
+    });
+
     root.querySelectorAll("[data-competition-type]").forEach(button=>{
       listen(button,"click",()=>{if(!state.currentArchive||state.generating)return; const value=button.dataset.competitionType||""; state.currentArchive.ai=state.currentArchive.ai||{}; state.currentArchive.ai.competitionType=value; if(value!=="自定义挑战") state.currentArchive.ai.competitionCustom=""; renderPage();});
     });
@@ -4822,7 +4770,7 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
       listen(button,"click",()=>{
         const competition=state.currentArchive?.ai?.competition, contestant=(competition?.contestants||[]).find(c=>String(c.characterId||c.id)===String(button.dataset.competitionChar)); if(!contestant)return;
         const modal=document.createElement("div"); modal.className="xd-modal-wrap";
-        modal.innerHTML=`<section class="xd-modal"><div class="xd-modal-handle"></div><div class="xd-kicker">LIVE COMPETITION</div><div class="xd-modal-title" style="margin-top:4px;">${esc(contestant.name)}</div><div style="margin-top:12px;font-size:12px;line-height:1.8;color:#65575a;">${esc(contestant.status||"比赛进行中")}</div><div style="margin-top:10px;padding:12px;border-radius:16px;background:#fbf1f3;font-size:11px;line-height:1.7;">${esc(contestant.work||"正在进行……")}</div><div class="xd-modal-actions" style="display:grid;gap:8px;margin-top:14px;">${(contestant.interactions||[]).slice(0,2).map((x,i)=>`<button class="xd-small-btn" data-competition-interaction="${i}" style="width:100%;">${esc(x.label)}</button>`).join("")}<button class="xd-small-btn" data-close-competition-modal style="width:100%;">先继续观察</button></div></section>`;
+        modal.innerHTML=`<section class="xd-modal"><div class="xd-modal-handle"></div><div class="xd-kicker">LIVE COMPETITION</div><div class="xd-modal-title" style="margin-top:4px;">${esc(contestant.name)}</div><div style="margin-top:12px;font-size:12px;line-height:1.8;color:#65575a;">${esc(contestant.status||"比赛进行中")}</div><div style="margin-top:10px;padding:12px;border-radius:16px;background:#fbf1f3;font-size:11px;line-height:1.7;">${esc(contestant.work||"正在进行……")}</div><div class="xd-modal-actions" style="display:grid;gap:8px;margin-top:14px;">${(contestant.interactions||[]).slice(0,3).map((x,i)=>`<button class="xd-small-btn" data-competition-interaction="${i}" style="width:100%;">${esc(x.label)}</button>`).join("")}<button class="xd-small-btn" data-competition-custom style="width:100%;">✎ 自定义互动</button><button class="xd-small-btn" data-close-competition-modal style="width:100%;">先继续观察</button></div></section>`;
         state.container.querySelector(".roche-plugin-xindong-xianchang").appendChild(modal);
         modal.querySelectorAll("[data-competition-interaction]").forEach(btn=>listen(btn,"click",async()=>{if(state.generating)return; const interaction=(contestant.interactions||[])[Number(btn.dataset.competitionInteraction)]; if(!interaction)return; state.generating=true; showGenerating("正在回应你的互动……","镜头正在记录这一刻"); try{const result=await generateAICompetitionInteraction(state.currentArchive,competition,contestant,interaction); contestant.status="刚刚回应了你的互动"; contestant.interactionResult=result; state.currentArchive.events=state.currentArchive.events||[]; state.currentArchive.events.push({type:"competition-interaction",day:state.currentArchive.currentDay||1,characterId:contestant.characterId,characterName:contestant.name,text:result,createdAt:Date.now(),ai:true}); state.currentArchive.danmu=await generateAIDanmu(state.currentArchive,`${state.currentArchive.ai.competitionType} · ${contestant.name}互动`); await saveCurrentArchive(); state.generating=false; hideGenerating(); modal.remove(); renderPage();}catch{state.generating=false;hideGenerating();toast("AI 暂时没有回应，请稍后再试");}}));
         listen(modal.querySelector("[data-close-competition-modal]"),"click",()=>modal.remove()); listen(modal,"click",e=>{if(e.target===modal)modal.remove();});
@@ -4859,6 +4807,8 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
         task.result=event; task.resultCharacterId=chosen.characterId||chosen.id; archive.lastNarrative=event; archive.events=archive.events||[]; archive.events.push({type:"heart-task",day:archive.currentDay||1,characterId:task.resultCharacterId,characterName:chosen.name,title:task.title,task:chosen.task,text:event,createdAt:Date.now(),ai:true}); archive.danmu=await generateAIDanmu(archive,`双人任务：${chosen.name}`); await saveCurrentArchive(); state.generating=false;hideGenerating();renderPage();
       }catch(e){state.generating=false;hideGenerating();toast("AI 暂时没有回应，请稍后再试");}
     });
+
+    listen(root.querySelector("[data-favorite-date]"),"click",async()=>{const archive=state.currentArchive;if(!archive)return;const plan=archive.ai?.datePlan||{},scene=archive.ai?.dateScene||{};archive.observationRecords=archive.observationRecords||[];const rec={id:uid(),type:"date",title:`${archive.vote?.winner||"双人"} · 约会记录`,text:`地点：${plan.place||""}\n活动：${plan.activity||""}\n主题：${plan.theme||""}\n\n${scene.scene||archive.lastNarrative||""}`,day:archive.currentDay||1,createdAt:Date.now(),favorite:true};if(!archive.observationRecords.some(x=>x.type==="date"&&x.text===rec.text))archive.observationRecords.push(rec);await saveCurrentArchive();const b=root.querySelector("[data-favorite-date]");if(b)b.textContent="♥ 已收藏到观察室";});
 
     root.querySelectorAll("[data-date-action]").forEach(button => {
       listen(button, "click", async () => {
@@ -5387,10 +5337,12 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
             archive.ai.lastEvent = result;
             archive.danmu = await generateAIDanmu(archive, `心动小屋 · ${names[room] || "地点"} · ${option.label}`);
             await saveCurrentArchive();
-            modal.remove();
             state.generating = false;
             hideGenerating();
-            renderPage();
+            modal.innerHTML = `<section class="xd-modal xd-house-event-modal"><div class="xd-modal-handle"></div><div class="xd-kicker">${esc(names[room]||"HOUSE EVENT")} · RESULT</div><div class="xd-modal-title" style="margin-top:4px;">${esc(event.title||"小屋事件")}</div><div class="xd-house-event-scene">${esc(result||"")}</div><div class="xd-program-result" style="margin-top:10px;"><div class="xd-stage-label">你的选择</div><div class="xd-scene-short">${esc(option.label||"自定义行动")}</div></div><button class="xd-small-btn" data-house-event-favorite style="width:100%;margin-top:10px;">♡ 收藏这段花絮</button><button class="xd-primary" data-close-house-result style="width:100%;margin-top:8px;">继续探索小屋</button></section>`;
+            listen(modal.querySelector("[data-close-house-result]"),"click",()=>modal.remove());
+            listen(modal.querySelector("[data-house-event-favorite]"),"click",async()=>{const rec={id:uid(),room,roomName:names[room]||room,title:event.title||"小屋花絮",text:`${event.scene||""}\n\n${result||""}`,day:archive.currentDay||1,createdAt:Date.now(),ai:true,favorite:true};archive.observationRecords=archive.observationRecords||[];if(!archive.observationRecords.some(x=>x.title===rec.title&&x.text===rec.text))archive.observationRecords.push(rec);await saveCurrentArchive();modal.querySelector("[data-house-event-favorite]").textContent="♥ 已收藏到观察室";});
+            listen(modal,e=>{if(e.target===modal)modal.remove();});
           } catch (error) {
             console.error("[心动现场] house outcome", error);
             state.generating = false;
@@ -5416,6 +5368,45 @@ USER刚刚说：${text}`,{maxTokens:500,temperature:.9});
       hideGenerating();
       toast("AI 暂时没有回应，请稍后再试");
     }
+  }
+
+  async function generateAINightPlayContent(archive, play) {
+    const ctx = buildAIContext(archive);
+    const prompt = `你是《心动现场》的夜间节目导演。现在不是进入心动小屋，而是执行已经选中的“独立夜间玩法”。
+玩法标题：${play?.title || "今晚玩法"}
+玩法说明：${play?.desc || ""}
+DAY：${archive.currentDay || 2}
+请根据世界书、恋综基调、嘉宾人设、当前关系和最近剧情，把这个玩法真正展开成一段可玩的恋综内容。必须让玩家看见具体发生了什么、谁做了什么、现场有什么反应。所有恋爱线围绕USER，嘉宾之间只能友情、竞争、合作或吃瓜，不生成嘉宾同性恋爱CP。严格只输出JSON：
+{"title":"玩法标题","scene":"250-450字完整现场剧情","options":[{"label":"选项1","text":"具体行动"},{"label":"选项2","text":"具体行动"},{"label":"选项3","text":"具体行动"}],"danmuTopic":"弹幕主题"}
+不要输出“去心动小屋触发”之类的跳转指令。
+USER：${JSON.stringify(ctx.user)}
+嘉宾：${JSON.stringify(ctx.characters)}
+世界书：${ctx.worldbooks}
+关系：${JSON.stringify(archive.relationships||{})}
+最近剧情：${JSON.stringify((archive.events||[]).slice(-12))}`;
+    const fallback = {
+      title: play?.title || "今晚玩法",
+      scene: `节目组正式开始了“${play?.title || "今晚玩法"}”。镜头切到现场，所有人都很快进入状态。${play?.desc || "今晚的内容正在根据本季世界观和嘉宾性格展开。"}`,
+      options: [
+        {label:"主动参与",text:"按照节目规则积极参与。"},
+        {label:"观察并调侃",text:"先观察其他人的反应，再适时开口。"},
+        {label:"大胆改变玩法",text:"提出一个符合现场气氛的新玩法。"}
+      ],
+      danmuTopic: play?.title || "夜间玩法"
+    };
+    return parseLooseJSON(await aiText(prompt,{maxTokens:1600,temperature:0.95}),fallback);
+  }
+
+  async function generateAIPhoneAppContent(archive, char, app) {
+    const ctx=buildAIContext(archive);
+    const labels={dynamics:"动态",weibo:"微博",diary:"日记",notes:"备忘录"};
+    const prompt=`你是恋综角色手机内容生成器。请为嘉宾${char?.name||"嘉宾"}生成一条${labels[app]||app}。只能写这个角色自己的内容，不能把嘉宾之间写成恋爱CP。内容必须来自今天真实发生的节目事件、人设、关系和世界书。直接输出正文，不要解释。
+角色：${JSON.stringify(char)}
+USER：${JSON.stringify(ctx.user)}
+世界书：${ctx.worldbooks}
+关系：${JSON.stringify(archive.relationships||{})}
+今日事件：${JSON.stringify((archive.events||[]).slice(-15))}`;
+    return aiText(prompt,{maxTokens:700,temperature:0.95});
   }
 
   function showGenerating(title, sub) {
